@@ -88,21 +88,42 @@ public final class DatabaseReader: @unchecked Sendable {
         let sql = """
             SELECT r.chatId, r.type, r.chatName, r.activeMembersCount,
                    r.lastLogId, r.lastUpdatedAt, r.countOfNewMessage,
-                   u.displayName, u.friendNickName, u.nickName
+                   u.displayName, u.friendNickName, u.nickName,
+                   m.content, o.linkName, r.displayMemberIds
             FROM NTChatRoom r
             LEFT JOIN NTUser u ON r.directChatMemberUserId = u.userId AND u.linkId = 0
+            LEFT JOIN NTChatMeta m ON r.chatId = m.chatId AND m.type = 3
+            LEFT JOIN NTOpenLink o ON r.linkId = o.linkId AND r.linkId != 0
             ORDER BY r.lastUpdatedAt DESC
             LIMIT ?
             """
         return try query(sql, bind: [.int(limit)]) { row in
-            // For direct chats, use the friend's name; for groups, use chatName
             let chatName = row.string(2)
-            let displayName = row.string(7) ?? row.string(8) ?? row.string(9)
-            let name = chatName ?? displayName ?? "(unknown)"
+            let friendName = row.string(7) ?? row.string(8) ?? row.string(9)
+            let metaName = row.string(10)
+            let openLinkName = row.string(11)
+            let displayMemberIds = row.blob(12)
+
+            // Build member name for unnamed group chats
+            var memberName: String? = nil
+            if let blob = displayMemberIds, !blob.isEmpty {
+                memberName = resolveMemberNames(from: blob)
+            }
+
+            let chatType = Chat.ChatType.from(rawInt: row.int(1))
+            let isSelfChat = row.int(1) == 5
+
+            // Priority: custom name > chatName > openLink name > member names > friend name > self-chat
+            let name: String
+            if isSelfChat {
+                name = metaName ?? chatName ?? "나와의 채팅"
+            } else {
+                name = metaName ?? chatName ?? openLinkName ?? memberName ?? friendName ?? "(unknown)"
+            }
 
             return Chat(
                 id: row.int64(0),
-                type: Chat.ChatType.from(rawInt: row.int(1)),
+                type: chatType,
                 displayName: name,
                 memberCount: row.int(3),
                 lastMessageId: row.optionalInt64(4),
@@ -110,6 +131,27 @@ public final class DatabaseReader: @unchecked Sendable {
                 unreadCount: row.int(6)
             )
         }
+    }
+
+    /// Parse displayMemberIds (binary plist of user IDs) and resolve names from NTUser.
+    private func resolveMemberNames(from blob: Data) -> String? {
+        guard let plist = try? PropertyListSerialization.propertyList(from: blob, format: nil),
+              let userIds = plist as? [NSNumber], !userIds.isEmpty else {
+            return nil
+        }
+        let placeholders = userIds.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT COALESCE(friendNickName, nickName, displayName)
+            FROM NTUser
+            WHERE linkId = 0 AND userId IN (\(placeholders))
+            """
+        let bindings = userIds.map { SQLValue.int64(Int64(truncating: $0)) }
+        guard let names: [String] = try? query(sql, bind: bindings, transform: { row in
+            row.string(0) ?? ""
+        }).filter({ !$0.isEmpty }) else {
+            return nil
+        }
+        return names.isEmpty ? nil : names.joined(separator: ", ")
     }
 
     /// Get messages for a chat, optionally filtered by time.
@@ -355,16 +397,25 @@ public final class DatabaseReader: @unchecked Sendable {
             let val = sqlite3_column_int64(stmt, col)
             return val == 0 ? nil : Date(timeIntervalSince1970: Double(val))
         }
+
+        func blob(_ col: Int32) -> Data? {
+            guard sqlite3_column_type(stmt, col) != SQLITE_NULL,
+                  let ptr = sqlite3_column_blob(stmt, col) else { return nil }
+            let size = Int(sqlite3_column_bytes(stmt, col))
+            return Data(bytes: ptr, count: size)
+        }
     }
 }
 
 extension Chat.ChatType {
     /// Map KakaoTalk's integer chat type to our enum.
     static func from(rawInt: Int) -> Self {
-        // KakaoTalk uses integer types; exact mapping TBD via testing
         switch rawInt {
         case 0: return .direct
         case 1: return .group
+        case 2: return .direct   // bot / official account
+        case 4: return .openChat
+        case 5: return .direct   // self-chat
         default: return .unknown
         }
     }
