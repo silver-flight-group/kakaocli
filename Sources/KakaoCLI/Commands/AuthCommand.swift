@@ -11,6 +11,9 @@ struct AuthCommand: ParsableCommand {
     @Flag(name: .long, help: "Show derived values (key, db name) for debugging")
     var verbose = false
 
+    @Flag(name: .long, help: "Force userId re-discovery by clearing the cache before running")
+    var refresh = false
+
     @Option(name: .long, help: "Override user ID instead of reading from plist")
     var userId: Int?
 
@@ -18,6 +21,11 @@ struct AuthCommand: ParsableCommand {
     var uuid: String?
 
     func run() throws {
+        // 0. If --refresh, clear cached userId before any discovery
+        if refresh {
+            DeviceInfo.clearUserIdCache()
+        }
+
         // 1. Get device UUID
         let deviceUUID: String
         if let override = uuid {
