@@ -187,19 +187,25 @@ public enum AXHelpers {
     }
 
     /// Find the AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
+    /// Older/newer KakaoTalk builds vary between AXTable and AXOutline and may
+    /// expose the visible name as "_NS:18", "Display Name", or a plain static text.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
         for row in children(table) {
             guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
-                        let name = value(child) ?? ""
-                        let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
-                        if matches {
-                            return row
-                        }
+                    guard role(child) == "AXStaticText" else { continue }
+                    let name = value(child) ?? title(child) ?? ""
+                    let id = identifier(child) ?? ""
+                    let likelyDisplayName =
+                        id == "_NS:18" ||
+                        id == "Display Name" ||
+                        (!name.isEmpty && id != "_NS:73" && id != "_NS:93")
+                    guard likelyDisplayName else { continue }
+                    let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
+                    if matches {
+                        return row
                     }
                 }
             }
@@ -269,13 +275,14 @@ public enum AXHelpers {
         return false
     }
 
-    /// Get the AXTable (chat list) from the main window.
+    /// Get the chat list container from the main window.
+    /// KakaoTalk currently exposes this as AXTable on some builds and AXOutline on others.
     public static func chatListTable(_ window: AXUIElement) -> AXUIElement? {
-        // Structure: AXWindow > AXScrollArea > AXTable
+        // Structure: AXWindow > AXScrollArea > AXTable/AXOutline
         for child in children(window) {
             if role(child) == "AXScrollArea" {
                 for subchild in children(child) {
-                    if role(subchild) == "AXTable" {
+                    if role(subchild) == "AXTable" || role(subchild) == "AXOutline" {
                         return subchild
                     }
                 }
@@ -289,7 +296,7 @@ public enum AXHelpers {
         for child in children(window) {
             if role(child) == "AXScrollArea" {
                 for subchild in children(child) {
-                    if role(subchild) == "AXTable" {
+                    if role(subchild) == "AXTable" || role(subchild) == "AXOutline" {
                         return child
                     }
                 }

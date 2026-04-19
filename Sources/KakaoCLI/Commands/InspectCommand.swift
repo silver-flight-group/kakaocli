@@ -33,7 +33,10 @@ struct InspectCommand: ParsableCommand {
                 print("Could not find main window")
                 throw ExitCode.failure
             }
-            if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") {
+            let chatroomsTab =
+                AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") ??
+                AXHelpers.findFirst(mainWindow, role: "AXButton", identifier: "chatrooms")
+            if let chatroomsTab {
                 _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
                 Thread.sleep(forTimeInterval: 0.3)
             }

@@ -35,7 +35,10 @@ public final class KakaoAutomator {
         }
 
         // 4. Ensure we're on the Chats tab
-        if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") {
+        let chatroomsTab =
+            AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") ??
+            AXHelpers.findFirst(mainWindow, role: "AXButton", identifier: "chatrooms")
+        if let chatroomsTab {
             _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
             Thread.sleep(forTimeInterval: 0.3)
         }
@@ -89,8 +92,15 @@ public final class KakaoAutomator {
             throw AutomationError.inputFieldNotFound
         }
 
-        // 8. Find the message input field
-        guard let inputField = findInputField(in: chatWindow) else {
+        // 8. Wait briefly for the message composer to become available.
+        let inputDeadline = Date().addingTimeInterval(5.0)
+        var inputField: AXUIElement?
+        while Date() < inputDeadline {
+            inputField = findInputField(in: chatWindow)
+            if inputField != nil { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        guard let inputField else {
             throw AutomationError.inputFieldNotFound
         }
 
@@ -116,19 +126,35 @@ public final class KakaoAutomator {
         _ = AXHelpers.closeWindow(chatWindow)
     }
 
-    /// Find the message input AXTextArea in a chat window.
-    /// The input is in a top-level AXScrollArea that does NOT contain an AXTable (messages).
+    /// Find the message composer in a chat window.
+    /// The composer lives inside a top-level AXScrollArea that does not contain the
+    /// message AXTable. Some KakaoTalk builds wrap the editable field deeper than one level.
     private func findInputField(in window: AXUIElement) -> AXUIElement? {
         for child in AXHelpers.children(window) {
             guard AXHelpers.role(child) == "AXScrollArea" else { continue }
-            // The message list scroll area contains an AXTable; the input one doesn't
+            // The message list scroll area contains an AXTable; the composer one doesn't.
             let hasTable = AXHelpers.children(child).contains { AXHelpers.role($0) == "AXTable" }
             if !hasTable {
-                // This scroll area should contain the input AXTextArea
-                for subchild in AXHelpers.children(child) {
-                    if AXHelpers.role(subchild) == "AXTextArea" {
-                        return subchild
-                    }
+                let textAreas = AXHelpers.findAll(child, role: "AXTextArea", maxDepth: 4)
+                if let composer = textAreas.first(where: {
+                    let desc = AXHelpers.description($0) ?? ""
+                    return desc.localizedCaseInsensitiveContains("enter a message")
+                }) {
+                    return composer
+                }
+                if let composer = textAreas.first {
+                    return composer
+                }
+
+                let textFields = AXHelpers.findAll(child, role: "AXTextField", maxDepth: 4)
+                if let composer = textFields.first(where: {
+                    let desc = AXHelpers.description($0) ?? ""
+                    return desc.localizedCaseInsensitiveContains("enter a message")
+                }) {
+                    return composer
+                }
+                if let composer = textFields.first {
+                    return composer
                 }
             }
         }
