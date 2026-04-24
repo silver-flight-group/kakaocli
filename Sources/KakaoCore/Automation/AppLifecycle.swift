@@ -28,36 +28,52 @@ public enum AppLifecycle {
     /// Set `aggressive: true` to try showing the window if hidden (slower, has side effects).
     /// Use `aggressive: false` when polling during login to avoid interfering.
     public static func detectState(aggressive: Bool = true) -> KakaoAppState {
+        let debug = ProcessInfo.processInfo.environment["KAKAOCLI_DEBUG"] != nil
+        func dlog(_ s: String) { if debug { fputs("[detectState] \(s)\n", stderr) } }
+        dlog("begin aggressive=\(aggressive)")
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
+            dlog("not running")
             return .notRunning
         }
 
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        dlog("got axApp, calling windows()")
         var windows = AXHelpers.windows(axApp)
+        dlog("windows.count=\(windows.count)")
 
         if windows.isEmpty && aggressive {
             // KakaoTalk hides its window when "closed" (still running in menu bar).
             // Activate it to make windows visible, then re-check.
+            dlog("empty + aggressive: activating")
             app.activate()
             Thread.sleep(forTimeInterval: 0.5)
             windows = AXHelpers.windows(axApp)
+            dlog("after activate windows.count=\(windows.count)")
         }
 
         if windows.isEmpty && aggressive {
             // Still no windows — try to show the main window via status bar menu.
+            dlog("still empty, showing main window via menu")
             showMainWindow(axApp)
             Thread.sleep(forTimeInterval: 1.0)
             windows = AXHelpers.windows(axApp)
+            dlog("after showMainWindow windows.count=\(windows.count)")
         }
 
         // Check for real AXWindow elements first
+        dlog("filtering real windows by role")
         let realWindows = windows.filter { AXHelpers.role($0) == "AXWindow" }
+        dlog("realWindows.count=\(realWindows.count)")
         if !realWindows.isEmpty {
             // Prioritize Main Window for classification
             if let mainWindow = realWindows.first(where: { AXHelpers.identifier($0) == "Main Window" }) {
-                return classifyWindow(mainWindow)
+                dlog("classifying Main Window")
+                let r = classifyWindow(mainWindow)
+                dlog("classifyWindow returned \(r)")
+                return r
             }
             // Non-Main-Window windows are chat windows → we're logged in
+            dlog("no Main Window, but have realWindows → loggedIn")
             return .loggedIn
         }
 
@@ -85,11 +101,17 @@ public enum AppLifecycle {
             if title.lowercased().contains("log in") || title == "로그인" {
                 return .loginScreen
             }
-            if AXHelpers.findFirst(window, role: "AXImage", identifier: "Logo") != nil {
-                return .loginScreen
-            }
+            // Fast positive check first: if the chat list table exists (shallow 2-level lookup),
+            // we're logged in. This avoids an expensive full-tree Logo search on logged-in
+            // windows, which becomes pathological when AXManualAccessibility forces eager
+            // construction of the entire chat list subtree (hundreds of rows).
             if AXHelpers.chatListTable(window) != nil {
                 return .loggedIn
+            }
+            // Fallback login detection: bounded-depth Logo lookup (Logo sits near window root
+            // on the login screen, so depth 4 is more than enough).
+            if AXHelpers.findFirst(window, role: "AXImage", identifier: "Logo", maxDepth: 4) != nil {
+                return .loginScreen
             }
             return .loggedIn
         }
