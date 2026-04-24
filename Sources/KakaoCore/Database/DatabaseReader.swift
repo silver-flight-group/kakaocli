@@ -88,26 +88,94 @@ public final class DatabaseReader: @unchecked Sendable {
         let sql = """
             SELECT r.chatId, r.type, r.chatName, r.activeMembersCount,
                    r.lastLogId, r.lastUpdatedAt, r.countOfNewMessage,
-                   u.displayName, u.friendNickName, u.nickName
+                   u.displayName, u.friendNickName, u.nickName,
+                   ol.linkName, r.displayMemberIds
             FROM NTChatRoom r
             LEFT JOIN NTUser u ON r.directChatMemberUserId = u.userId AND u.linkId = 0
+            LEFT JOIN NTOpenLink ol ON r.linkId = ol.linkId AND r.linkId != 0
             ORDER BY r.lastUpdatedAt DESC
             LIMIT ?
             """
-        return try query(sql, bind: [.int(limit)]) { row in
-            // For direct chats, use the friend's name; for groups, use chatName
-            let chatName = row.string(2)
-            let displayName = row.string(7) ?? row.string(8) ?? row.string(9)
-            let name = chatName ?? displayName ?? "(unknown)"
 
-            return Chat(
+        // First pass: collect raw fields and any pending member-id lookups.
+        struct Raw {
+            let id: Int64; let type: Int; let chatName: String?; let direct: String?; let link: String?
+            let memberIds: [Int64]; let memberCount: Int; let lastMsgId: Int64?; let lastMsgAt: Date?; let unread: Int
+        }
+        func nonEmpty(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
+
+        let raws: [Raw] = try query(sql, bind: [.int(limit)]) { row in
+            let memberBlob = row.blob(11)
+            var members: [Int64] = []
+            if let data = memberBlob,
+               let obj = try? PropertyListSerialization.propertyList(from: data, format: nil),
+               let arr = obj as? [Any] {
+                members = arr.compactMap { v in
+                    if let i = v as? Int64 { return i }
+                    if let i = v as? Int { return Int64(i) }
+                    if let n = v as? NSNumber { return n.int64Value }
+                    return nil
+                }
+            }
+            return Raw(
                 id: row.int64(0),
-                type: Chat.ChatType.from(rawInt: row.int(1)),
-                displayName: name,
+                type: row.int(1),
+                chatName: nonEmpty(row.string(2)),
+                direct: nonEmpty(row.string(7)) ?? nonEmpty(row.string(8)) ?? nonEmpty(row.string(9)),
+                link: nonEmpty(row.string(10)),
+                memberIds: members,
                 memberCount: row.int(3),
-                lastMessageId: row.optionalInt64(4),
-                lastMessageAt: row.optionalKakaoDate(5),
-                unreadCount: row.int(6)
+                lastMsgId: row.optionalInt64(4),
+                lastMsgAt: row.optionalKakaoDate(5),
+                unread: row.int(6)
+            )
+        }
+
+        // Second pass: resolve userIds for chats that still need a name.
+        let needsMembers = raws.filter { r in
+            r.chatName == nil && r.direct == nil && r.link == nil && r.type != 5 && !r.memberIds.isEmpty
+        }
+        let allIds = Set(needsMembers.flatMap { $0.memberIds })
+        var nameById: [Int64: String] = [:]
+        if !allIds.isEmpty {
+            let placeholders = Array(repeating: "?", count: allIds.count).joined(separator: ",")
+            let userSql = """
+                SELECT userId, COALESCE(NULLIF(displayName,''), NULLIF(friendNickName,''), NULLIF(nickName,'')) AS name
+                FROM NTUser
+                WHERE linkId = 0 AND userId IN (\(placeholders))
+                """
+            let binds: [SQLValue] = allIds.map { .int(Int($0)) }
+            let pairs: [(Int64, String)] = try query(userSql, bind: binds) { r in
+                guard let n = r.string(1) else { return (r.int64(0), "") }
+                return (r.int64(0), n)
+            }
+            for (uid, n) in pairs where !n.isEmpty { nameById[uid] = n }
+        }
+
+        // Assemble final Chat list.
+        return raws.map { r in
+            let selfLabel: String? = (r.type == 5) ? "Self-chat (Notes)"
+                : (r.type >= 9999 || r.id < 0) ? "(system)"
+                : nil
+            var groupLabel: String? = nil
+            if selfLabel == nil, r.chatName == nil, r.direct == nil, r.link == nil, !r.memberIds.isEmpty {
+                let resolved = r.memberIds.compactMap { nameById[$0] }
+                if !resolved.isEmpty {
+                    let head = resolved.prefix(3).joined(separator: ", ")
+                    let hidden = r.memberCount - resolved.count - 1  // -1 for self
+                    let extra = hidden > 0 ? " +\(hidden) more" : ""
+                    groupLabel = head + extra
+                }
+            }
+            let name = selfLabel ?? r.chatName ?? r.direct ?? r.link ?? groupLabel ?? "(unknown)"
+            return Chat(
+                id: r.id,
+                type: Chat.ChatType.from(rawInt: r.type),
+                displayName: name,
+                memberCount: r.memberCount,
+                lastMessageId: r.lastMsgId,
+                lastMessageAt: r.lastMsgAt,
+                unreadCount: r.unread
             )
         }
     }
@@ -339,6 +407,13 @@ public final class DatabaseReader: @unchecked Sendable {
         func string(_ col: Int32) -> String? {
             guard let ptr = sqlite3_column_text(stmt, col) else { return nil }
             return String(cString: ptr)
+        }
+
+        func blob(_ col: Int32) -> Data? {
+            guard let ptr = sqlite3_column_blob(stmt, col) else { return nil }
+            let n = Int(sqlite3_column_bytes(stmt, col))
+            guard n > 0 else { return nil }
+            return Data(bytes: ptr, count: n)
         }
 
         func bool(_ col: Int32) -> Bool {
