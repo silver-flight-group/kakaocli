@@ -194,7 +194,12 @@ public enum DeviceInfo {
     /// Recover a userId by brute-forcing the SHA-512 pre-image.
     /// KakaoTalk stores SHA-512(userId) as hex in plist keys. Since userIds are
     /// typically small integers, this is fast (< 1 second for IDs under 1M).
-    /// Searches up to 1 billion with a 10-second timeout.
+    /// Searches up to 1 billion with a 120-second timeout.
+    ///
+    /// Timeout was raised from 10s after an observed account with userId
+    /// ~25.7M where the Swift/CommonCrypto loop reached the checkpoint just
+    /// past the 10s budget and returned nil, causing key derivation to fall
+    /// back to AlertKakaoIDsList candidates (unrelated IDs) and failing auth.
     public static func recoverUserIdFromSHA512(hexHash: String) -> Int? {
         guard hexHash.count == 128 else { return nil }
         // Parse target hash to bytes
@@ -216,9 +221,9 @@ public enum DeviceInfo {
             if hash == targetBytes {
                 return i
             }
-            // Timeout after 10 seconds
+            // Timeout after 120 seconds
             if i % 5_000_000 == 0 && i > 0 {
-                if CFAbsoluteTimeGetCurrent() - startTime > 10 { return nil }
+                if CFAbsoluteTimeGetCurrent() - startTime > 120 { return nil }
             }
         }
         return nil
