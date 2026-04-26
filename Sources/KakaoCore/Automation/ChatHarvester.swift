@@ -209,13 +209,19 @@ public enum ChatHarvester {
     // MARK: - Private Helpers
 
     /// Extract the display name from a chat list row.
+    /// KakaoTalk Mac 26.x changed the AppKit auto-generated AX identifier of the
+    /// chat-name text label, so the previous `_NS:18` match no longer fires.
+    /// In the current cell layout (button, image, name, member-count, time,
+    /// preview-area, unread, badge) the chat name is the first non-empty
+    /// AXStaticText — it appears before purely numeric labels (member count,
+    /// unread) and before the time label.
     private static func extractName(from row: AXUIElement) -> String {
         for cell in AXHelpers.children(row) {
             guard AXHelpers.role(cell) == "AXCell" else { continue }
             for child in AXHelpers.children(cell) {
-                if AXHelpers.role(child) == "AXStaticText" && AXHelpers.identifier(child) == "_NS:18" {
-                    return AXHelpers.value(child) ?? "(unknown)"
-                }
+                guard AXHelpers.role(child) == "AXStaticText" else { continue }
+                guard let val = AXHelpers.value(child), !val.isEmpty else { continue }
+                return val
             }
         }
         return "(unknown)"
