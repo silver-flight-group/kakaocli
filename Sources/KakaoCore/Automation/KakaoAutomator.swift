@@ -145,8 +145,12 @@ public final class KakaoAutomator {
             }
             row = selfRow
         } else {
-            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName, exact: exactChatName) else {
+            let chatRows = AXHelpers.findChatRows(table, chatName: chatName, exact: exactChatName)
+            guard !chatRows.isEmpty, let chatRow = chatRows.first else {
                 throw AutomationError.chatNotFound(chatName)
+            }
+            if exactChatName && chatRows.count > 1 {
+                throw AutomationError.ambiguousChatName(chatName, chatRows.count)
             }
             row = chatRow
         }
@@ -293,6 +297,7 @@ public enum AutomationError: Error, CustomStringConvertible {
     case chatNotFound(String)
     case inputFieldNotFound
     case sendFailed(String)
+    case ambiguousChatName(String, Int)
     case menuButtonNotFound(String)
     case leaveMenuItemNotFound(String)
     case leaveConfirmationButtonNotFound(String)
@@ -307,6 +312,8 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "Could not find the message input field"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
+        case .ambiguousChatName(let name, let count):
+            return "Chat '\(name)' matched \(count) rows; refusing to continue"
         case .menuButtonNotFound(let name):
             return "Could not find the chat menu button for '\(name)'"
         case .leaveMenuItemNotFound(let name):

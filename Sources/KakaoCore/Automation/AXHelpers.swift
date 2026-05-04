@@ -232,6 +232,12 @@ public enum AXHelpers {
     /// Older/newer KakaoTalk builds vary between AXTable and AXOutline and may
     /// expose the visible name as "_NS:18", "Display Name", or a plain static text.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
+        findChatRows(table, chatName: chatName, exact: exact).first
+    }
+
+    /// Find all AXRows in a chat list whose visible name label matches the given text.
+    public static func findChatRows(_ table: AXUIElement, chatName: String, exact: Bool = false) -> [AXUIElement] {
+        var rows: [AXUIElement] = []
         for row in children(table) {
             guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
@@ -247,12 +253,13 @@ public enum AXHelpers {
                     guard likelyDisplayName else { continue }
                     let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
                     if matches {
-                        return row
+                        rows.append(row)
+                        break
                     }
                 }
             }
         }
-        return nil
+        return rows
     }
 
     /// Find the self-chat row (identified by "badge me" image in the cell).
