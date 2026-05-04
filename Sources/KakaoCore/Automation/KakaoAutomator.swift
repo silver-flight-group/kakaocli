@@ -10,93 +10,19 @@ public final class KakaoAutomator {
 
     /// Send a message to a chat by navigating the UI.
     public func sendMessage(to chatName: String, message: String, selfChat: Bool = false) throws {
-        // 1. Ensure KakaoTalk is running and logged in
-        let stateBefore = AppLifecycle.detectState()
-        try AppLifecycle.ensureReady(credentials: CredentialStore())
-        if stateBefore != .loggedIn {
-            Thread.sleep(forTimeInterval: 2.0)
-        }
+        let session = try openConversation(to: chatName, selfChat: selfChat)
 
-        // 2. Activate KakaoTalk and get windows
-        try AXHelpers.activateApp(bundleId: Self.bundleId)
-        let app = try AXHelpers.appElement(bundleId: Self.bundleId)
-
-        let windows = AXHelpers.windows(app)
-        guard let mainWindow = windows.first(where: { AXHelpers.identifier($0) == "Main Window" }) else {
-            throw AutomationError.noWindows
-        }
-
-        // 3. Close any existing chat windows to avoid sending to the wrong one
-        for w in windows where AXHelpers.identifier(w) != "Main Window" {
-            _ = AXHelpers.closeWindow(w)
-        }
-        if windows.count > 1 {
-            Thread.sleep(forTimeInterval: 0.3)
-        }
-
-        // 4. Ensure we're on the Chats tab
-        let chatroomsTab =
-            AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") ??
-            AXHelpers.findFirst(mainWindow, role: "AXButton", identifier: "chatrooms")
-        if let chatroomsTab {
-            _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
-            Thread.sleep(forTimeInterval: 0.3)
-        }
-
-        // 5. Find the chat row in the list
-        guard let table = AXHelpers.chatListTable(mainWindow) else {
-            throw AutomationError.chatNotFound(chatName)
-        }
-
-        let row: AXUIElement
-        if selfChat {
-            guard let selfRow = AXHelpers.findSelfChatRow(table) else {
-                throw AutomationError.chatNotFound("self-chat (나와의 채팅)")
-            }
-            row = selfRow
-        } else {
-            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName) else {
-                throw AutomationError.chatNotFound(chatName)
-            }
-            row = chatRow
-        }
-
-        // 6. Open the chat via AX row selection + Enter (works even when off-screen).
-        //    Falls back to scroll-into-view + double-click if selection fails.
-        var opened = false
-        if AXHelpers.selectRow(row, in: table) {
-            Thread.sleep(forTimeInterval: 0.2)
-            AXHelpers.pressKey(keyCode: 36) // Enter to open
-            Thread.sleep(forTimeInterval: 0.5)
-            let checkWindows = AXHelpers.windows(app)
-            opened = checkWindows.contains { AXHelpers.identifier($0) != "Main Window" }
-        }
-        if !opened {
-            if let scrollArea = AXHelpers.chatListScrollArea(mainWindow) {
-                _ = AXHelpers.scrollRowToVisible(row, in: scrollArea)
-                Thread.sleep(forTimeInterval: 0.3)
-            }
-            AXHelpers.doubleClickElement(row)
-        }
-
-        // 7. Wait for the chat window to appear
-        var chatWindow: AXUIElement?
-        let windowDeadline = Date().addingTimeInterval(5.0)
-        while Date() < windowDeadline {
-            Thread.sleep(forTimeInterval: 0.5)
-            let updatedWindows = AXHelpers.windows(app)
-            chatWindow = updatedWindows.first(where: { AXHelpers.identifier($0) != "Main Window" })
-            if chatWindow != nil { break }
-        }
-        guard let chatWindow else {
-            throw AutomationError.inputFieldNotFound
-        }
-
-        // 8. Wait briefly for the message composer to become available.
-        let inputDeadline = Date().addingTimeInterval(5.0)
+        // Wait briefly for the message composer to become available.
+        let inputDeadline = Date().addingTimeInterval(10.0)
+        var activeContainer = session.conversationContainer
         var inputField: AXUIElement?
         while Date() < inputDeadline {
-            inputField = findInputField(in: chatWindow)
+            inputField = AXHelpers.findMessageComposer(in: activeContainer)
+            if inputField == nil, AXHelpers.identifier(activeContainer) != "Main Window",
+               let inlineInput = AXHelpers.findMessageComposer(in: session.mainWindow) {
+                activeContainer = session.mainWindow
+                inputField = inlineInput
+            }
             if inputField != nil { break }
             Thread.sleep(forTimeInterval: 0.25)
         }
@@ -104,8 +30,8 @@ public final class KakaoAutomator {
             throw AutomationError.inputFieldNotFound
         }
 
-        // 9. Focus and type the message
-        _ = AXHelpers.performAction(chatWindow, kAXRaiseAction as String)
+        // Focus and type the message.
+        _ = AXHelpers.performAction(activeContainer, kAXRaiseAction as String)
         Thread.sleep(forTimeInterval: 0.3)
         AXHelpers.clickElement(inputField)
         Thread.sleep(forTimeInterval: 0.3)
@@ -121,46 +47,245 @@ public final class KakaoAutomator {
             AXHelpers.pressKey(keyCode: 36) // Return key
         }
 
-        // 10. Close the chat window
         Thread.sleep(forTimeInterval: 0.3)
-        _ = AXHelpers.closeWindow(chatWindow)
+        if AXHelpers.identifier(activeContainer) != "Main Window" {
+            _ = AXHelpers.closeWindow(activeContainer)
+        }
     }
 
-    /// Find the message composer in a chat window.
-    /// The composer lives inside a top-level AXScrollArea that does not contain the
-    /// message AXTable. Some KakaoTalk builds wrap the editable field deeper than one level.
-    private func findInputField(in window: AXUIElement) -> AXUIElement? {
-        for child in AXHelpers.children(window) {
-            guard AXHelpers.role(child) == "AXScrollArea" else { continue }
-            // The message list scroll area contains an AXTable; the composer one doesn't.
-            let hasTable = AXHelpers.children(child).contains { AXHelpers.role($0) == "AXTable" }
-            if !hasTable {
-                let textAreas = AXHelpers.findAll(child, role: "AXTextArea", maxDepth: 4)
-                if let composer = textAreas.first(where: {
-                    let desc = AXHelpers.description($0) ?? ""
-                    return desc.localizedCaseInsensitiveContains("enter a message")
-                }) {
-                    return composer
-                }
-                if let composer = textAreas.first {
-                    return composer
-                }
+    /// Leave a group chat through KakaoTalk's chat window menu.
+    public func leaveChat(to chatName: String) throws {
+        let session = try openConversation(to: chatName, selfChat: false, exactChatName: true)
+        _ = AXHelpers.performAction(session.conversationContainer, kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.3)
 
-                let textFields = AXHelpers.findAll(child, role: "AXTextField", maxDepth: 4)
-                if let composer = textFields.first(where: {
-                    let desc = AXHelpers.description($0) ?? ""
-                    return desc.localizedCaseInsensitiveContains("enter a message")
-                }) {
-                    return composer
+        guard let menuButton = findConversationMenuButton(in: session.conversationContainer) else {
+            throw AutomationError.menuButtonNotFound(chatName)
+        }
+
+        if !AXHelpers.performAction(menuButton, kAXPressAction as String) {
+            AXHelpers.clickElement(menuButton)
+        }
+        Thread.sleep(forTimeInterval: 0.4)
+
+        guard let leaveItem = waitForMenuItem(
+            in: session.app,
+            labels: ["Leave chatroom", "Leave Chatroom", "Leave Chat", "채팅방 나가기", "나가기"],
+            timeout: 3.0
+        ) else {
+            throw AutomationError.leaveMenuItemNotFound(chatName)
+        }
+        if !AXHelpers.performAction(leaveItem, kAXPressAction as String) {
+            AXHelpers.clickElement(leaveItem)
+        }
+
+        if let confirmButton = waitForConfirmationButton(
+            in: session.app,
+            includeLabels: ["Leave", "Leave chatroom", "Leave Chatroom", "Leave Chat Room", "OK", "확인", "나가기"],
+            excludeLabels: ["Cancel", "취소", "No", "아니오"],
+            timeout: 5.0
+        ) {
+            if !AXHelpers.performAction(confirmButton, kAXPressAction as String) {
+                AXHelpers.clickElement(confirmButton)
+            }
+        } else if hasConfirmationPrompt(in: session.app) {
+            throw AutomationError.leaveConfirmationButtonNotFound(chatName)
+        }
+    }
+
+    private struct ConversationSession {
+        let app: AXUIElement
+        let mainWindow: AXUIElement
+        let conversationContainer: AXUIElement
+    }
+
+    private func openConversation(
+        to chatName: String,
+        selfChat: Bool,
+        exactChatName: Bool = false
+    ) throws -> ConversationSession {
+        let stateBefore = AppLifecycle.detectState()
+        try AppLifecycle.ensureReady(credentials: CredentialStore())
+        if stateBefore != .loggedIn {
+            Thread.sleep(forTimeInterval: 2.0)
+        }
+
+        try AXHelpers.activateApp(bundleId: Self.bundleId)
+        let app = try AXHelpers.appElement(bundleId: Self.bundleId)
+
+        let windows = AXHelpers.windows(app)
+        guard let mainWindow = windows.first(where: { AXHelpers.identifier($0) == "Main Window" }) else {
+            throw AutomationError.noWindows
+        }
+
+        // Close existing chat windows so the next action cannot target an old conversation.
+        for window in windows where AXHelpers.identifier(window) != "Main Window" {
+            _ = AXHelpers.closeWindow(window)
+        }
+        if windows.count > 1 {
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+
+        let chatroomsTab =
+            AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") ??
+            AXHelpers.findFirst(mainWindow, role: "AXButton", identifier: "chatrooms")
+        if let chatroomsTab {
+            _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+
+        guard let table = AXHelpers.chatListTable(mainWindow) else {
+            throw AutomationError.chatNotFound(chatName)
+        }
+
+        let row: AXUIElement
+        if selfChat {
+            guard let selfRow = AXHelpers.findSelfChatRow(table) else {
+                throw AutomationError.chatNotFound("self-chat (나와의 채팅)")
+            }
+            row = selfRow
+        } else {
+            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName, exact: exactChatName) else {
+                throw AutomationError.chatNotFound(chatName)
+            }
+            row = chatRow
+        }
+
+        func waitForConversationContainer(timeout: TimeInterval = 2.0) -> AXUIElement? {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.25)
+                let updatedWindows = AXHelpers.windows(app)
+                if let chatWindow = updatedWindows.first(where: { AXHelpers.identifier($0) != "Main Window" }) {
+                    return chatWindow
                 }
-                if let composer = textFields.first {
-                    return composer
+                if AXHelpers.findMessageComposer(in: mainWindow) != nil {
+                    return mainWindow
                 }
             }
+            return nil
+        }
+
+        var conversationContainer: AXUIElement?
+        if AXHelpers.selectRow(row, in: table) {
+            Thread.sleep(forTimeInterval: 0.2)
+            AXHelpers.pressKey(keyCode: 36) // Enter to open
+            conversationContainer = waitForConversationContainer()
+        }
+        if conversationContainer == nil {
+            AXHelpers.clickElement(row)
+            Thread.sleep(forTimeInterval: 0.2)
+            AXHelpers.pressKey(keyCode: 36)
+            conversationContainer = waitForConversationContainer()
+        }
+        if conversationContainer == nil,
+           let nameLabel = AXHelpers.findFirst(row, role: "AXStaticText", text: chatName, maxDepth: 4) {
+            AXHelpers.doubleClickElement(nameLabel)
+            conversationContainer = waitForConversationContainer()
+        }
+        if conversationContainer == nil,
+           let cell = AXHelpers.children(row).first(where: { AXHelpers.role($0) == "AXCell" }) {
+            AXHelpers.doubleClickElement(cell)
+            conversationContainer = waitForConversationContainer()
+        }
+        if conversationContainer == nil {
+            if let scrollArea = AXHelpers.chatListScrollArea(mainWindow) {
+                _ = AXHelpers.scrollRowToVisible(row, in: scrollArea)
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+            AXHelpers.doubleClickElement(row)
+            conversationContainer = waitForConversationContainer(timeout: 5.0)
+        }
+
+        guard let conversationContainer else {
+            throw AutomationError.inputFieldNotFound
+        }
+        return ConversationSession(
+            app: app,
+            mainWindow: mainWindow,
+            conversationContainer: conversationContainer
+        )
+    }
+
+    private func findConversationMenuButton(in container: AXUIElement) -> AXUIElement? {
+        AXHelpers.findAll(container, role: "AXButton", maxDepth: 12).first { element in
+            labelMatches(element, include: ["Menu", "메뉴"])
+        }
+    }
+
+    private func waitForMenuItem(
+        in app: AXUIElement,
+        labels: [String],
+        timeout: TimeInterval
+    ) -> AXUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            for root in searchRoots(for: app) {
+                if let item = AXHelpers.findAll(root, role: "AXMenuItem", maxDepth: 14).first(where: {
+                    labelMatches($0, include: labels)
+                }) {
+                    return item
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.2)
         }
         return nil
     }
 
+    private func waitForConfirmationButton(
+        in app: AXUIElement,
+        includeLabels: [String],
+        excludeLabels: [String],
+        timeout: TimeInterval
+    ) -> AXUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            for root in searchRoots(for: app) {
+                if let button = AXHelpers.findAll(root, role: "AXButton", maxDepth: 14).first(where: {
+                    labelMatches($0, include: includeLabels, exclude: excludeLabels)
+                }) {
+                    return button
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        return nil
+    }
+
+    private func hasConfirmationPrompt(in app: AXUIElement) -> Bool {
+        searchRoots(for: app).contains { root in
+            AXHelpers.findAll(root, role: "AXButton", maxDepth: 14).contains {
+                labelMatches($0, include: ["Cancel", "취소", "No", "아니오"])
+            }
+        }
+    }
+
+    private func searchRoots(for app: AXUIElement) -> [AXUIElement] {
+        [app] + AXHelpers.windows(app)
+    }
+
+    private func labelMatches(
+        _ element: AXUIElement,
+        include: [String],
+        exclude: [String] = []
+    ) -> Bool {
+        let labels = [
+            AXHelpers.title(element),
+            AXHelpers.value(element),
+            AXHelpers.description(element),
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+        guard labels.contains(where: { label in
+            include.contains(where: { label.localizedCaseInsensitiveContains($0) })
+        }) else {
+            return false
+        }
+        return !labels.contains(where: { label in
+            exclude.contains(where: { label.localizedCaseInsensitiveContains($0) })
+        })
+    }
 }
 
 public enum AutomationError: Error, CustomStringConvertible {
@@ -168,6 +293,9 @@ public enum AutomationError: Error, CustomStringConvertible {
     case chatNotFound(String)
     case inputFieldNotFound
     case sendFailed(String)
+    case menuButtonNotFound(String)
+    case leaveMenuItemNotFound(String)
+    case leaveConfirmationButtonNotFound(String)
 
     public var description: String {
         switch self {
@@ -179,6 +307,12 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "Could not find the message input field"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
+        case .menuButtonNotFound(let name):
+            return "Could not find the chat menu button for '\(name)'"
+        case .leaveMenuItemNotFound(let name):
+            return "Could not find the leave-chatroom menu item for '\(name)'"
+        case .leaveConfirmationButtonNotFound(let name):
+            return "Could not find the leave confirmation button for '\(name)'"
         }
     }
 }

@@ -9,6 +9,18 @@ Instructions for AI agents that want to read and send KakaoTalk messages.
 - System Settings > Privacy & Security: **Full Disk Access** + **Accessibility** granted to your terminal
 - KakaoTalk credentials stored (see First-Time Setup below)
 
+## Source of Truth
+
+- Treat `~/Repository/kakaocli-upstream` as the source of truth.
+- For this machine's OpenClaw runtime, point `~/.openclaw/openclaw.json` at the stable built binary path:
+  - `~/Repository/kakaocli-upstream/.build/arm64-apple-macosx/release/kakaocli`
+- Source edits do not affect the live OpenClaw runtime until you rebuild with `swift build -c release`.
+- After AX/send fixes, prefer this local rollout order:
+  1. `swift test -Xcc -I/opt/homebrew/include -Xlinker -L/opt/homebrew/lib`
+  2. `swift build -c release -Xcc -I/opt/homebrew/include -Xlinker -L/opt/homebrew/lib`
+  3. `./.build/release/kakaocli status`
+  4. Restart the gateway in its current mode: use `launchctl kickstart -k "gui/$(id -u)/ai.openclaw.gateway"` when `~/.openclaw/bin/openclaw-gateway-screen.py status` shows `screenRunning: false`; use `~/.openclaw/bin/openclaw-gateway-screen.py restart` only when screen mode is already active.
+
 ## First-Time Setup
 
 Before using kakaocli, store credentials so the tool can auto-login:
@@ -77,6 +89,7 @@ KakaoTalk's macOS Accessibility (AX) hierarchy is non-standard:
 - When the window is hidden (app running in menu bar), there are zero real AXWindow elements
 - The **status bar menu** is the most reliable state indicator ("Log out" present = logged in)
 - After login, the window briefly disappears during the transition — don't poll aggressively
+- Inline composers and dedicated chat windows can differ between builds, so keep message-composer detection in shared helpers rather than duplicating it per command
 
 ## Quick Start
 
@@ -95,6 +108,9 @@ kakaocli send "Mom" "I'll be home soon"
 
 # Send to self-chat (for testing — ALWAYS use this for tests)
 kakaocli send x --me "Test message"
+
+# Preview leaving a chatroom
+kakaocli leave --dry-run "Test Room"
 
 # Watch for new messages (NDJSON stream)
 kakaocli sync --follow
@@ -134,6 +150,18 @@ kakaocli send "Mom" "Hello" --dry-run       # Preview without sending
 - Rate limit: wait at least 2 seconds between sends
 - The chat window opens, types, sends, then closes automatically
 - The `--me` flag sends to self-chat regardless of the chat name argument (use `_` as placeholder)
+
+## Leaving Chatrooms
+
+```bash
+kakaocli leave --dry-run "Chat Name"   # Preview without leaving
+kakaocli leave "Chat Name"             # Leave a chatroom via the KakaoTalk menu
+```
+
+**Important constraints:**
+- This is destructive for that KakaoTalk account; use `--dry-run` before testing.
+- UI automation needs Accessibility permission granted to your terminal or runtime binary.
+- Do not run actual leave tests against shared rooms unless the user explicitly asks.
 
 ## Sync Mode (Real-Time Monitoring)
 
@@ -238,7 +266,7 @@ Returns JSON array with per-chat results:
 ## Safety Rules
 
 1. **Never send test messages to other people's chats.** Use `--me` flag for testing.
-2. **Always use `--dry-run` first** when testing new send logic.
+2. **Always use `--dry-run` first** when testing new send or leave logic.
 3. **Rate limit sends** — at least 2 seconds between messages.
 4. **Respect hours** — avoid sending between 11 PM and 7 AM unless urgent.
-5. **Confirm before sending** — agents should verify message content with the user before sending to others.
+5. **Confirm before sending or leaving** — agents should verify message content or room names with the user before acting on other people's chats.

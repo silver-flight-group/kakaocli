@@ -28,6 +28,7 @@ struct SendCommand: ParsableCommand {
             print("Steps: activate KakaoTalk → find chat '\(target)' → type message → press Enter")
             return
         }
+        try AutomationPermissions.requireForSend()
         try automator.sendMessage(to: chat, message: message, selfChat: selfChat)
         print("Message sent to '\(target)'.")
     }

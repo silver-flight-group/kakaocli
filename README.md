@@ -24,6 +24,7 @@ kakaocli lets AI agents (Claude Code, Cursor, custom bots) check and send your K
 - **AI Agent Integration** — JSON output for every command, MCP skill definition, webhook delivery, auto-login
 - **Read** — list chats, view messages, full-text search, raw SQL queries
 - **Send** — send messages to any chat via UI automation
+- **Leave** — leave a chatroom via UI automation
 - **Sync** — real-time NDJSON message stream with webhook support
 - **Harvest** — bulk-capture chat names and load older message history
 
@@ -38,6 +39,7 @@ kakaocli는 AI 에이전트(Claude Code, Cursor, 커스텀 봇)가 카카오톡 
 - **AI 에이전트 연동** — 모든 명령의 JSON 출력, MCP 스킬 정의, 웹훅 전달, 자동 로그인
 - **읽기** — 채팅 목록, 메시지 조회, 전체 텍스트 검색, SQL 쿼리
 - **전송** — UI 자동화를 통한 메시지 전송
+- **나가기** — UI 자동화를 통한 채팅방 나가기
 - **동기화** — 실시간 NDJSON 메시지 스트림 및 웹훅 지원
 - **수집** — 채팅방 이름 일괄 수집 및 이전 메시지 로드
 
@@ -81,7 +83,7 @@ Your terminal app needs two permissions in **System Settings > Privacy & Securit
 - **Accessibility** (접근성) — for UI automation (sending messages, harvest)
 
 > [!NOTE]
-> Full Disk Access is required for all commands. Accessibility is only needed for `send`, `harvest`, and `inspect`.
+> Full Disk Access is required for all commands. Accessibility is only needed for `send`, `leave`, `harvest`, and `inspect`.
 
 ### 3. Verify it works / 동작 확인
 
@@ -114,6 +116,9 @@ kakaocli send "지수" "안녕!"
 
 # Send to self-chat (나와의 채팅) — safe for testing
 kakaocli send --me _ "test message"
+
+# Leave a chatroom (destructive; use --dry-run first)
+kakaocli leave --dry-run "테스트방"
 
 # Stream new messages as JSON
 kakaocli sync --follow
@@ -149,6 +154,13 @@ All read commands support `--json` for structured output.
 kakaocli send "chat name" "message"    # Send to a chat
 kakaocli send --me _ "message"         # Send to self-chat (나와의 채팅)
 kakaocli send --dry-run "name" "msg"   # Preview without sending
+```
+
+### Leave / 나가기
+
+```bash
+kakaocli leave --dry-run "chat name"   # Preview without leaving
+kakaocli leave "chat name"             # Leave a chatroom
 ```
 
 ### Sync / 동기화

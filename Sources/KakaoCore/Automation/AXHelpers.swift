@@ -186,6 +186,48 @@ public enum AXHelpers {
         return nil
     }
 
+    /// Find the message composer for a conversation window or inline chat view.
+    /// The composer usually lives inside a scroll area that does not contain the
+    /// message table, but some KakaoTalk builds expose it only via a deeper global search.
+    public static func findMessageComposer(in window: AXUIElement) -> AXUIElement? {
+        for child in children(window) {
+            guard role(child) == "AXScrollArea" else { continue }
+            let hasTable = children(child).contains { role($0) == "AXTable" }
+            if !hasTable {
+                if let composer = findComposer(in: child, maxDepth: 4) {
+                    return composer
+                }
+            }
+        }
+        return findComposer(in: window, maxDepth: 8)
+    }
+
+    private static func findComposer(in element: AXUIElement, maxDepth: Int) -> AXUIElement? {
+        let textAreas = findAll(element, role: "AXTextArea", maxDepth: maxDepth)
+        if let composer = textAreas.first(where: isLikelyMessageComposer) {
+            return composer
+        }
+        if let composer = textAreas.first {
+            return composer
+        }
+
+        let textFields = findAll(element, role: "AXTextField", maxDepth: maxDepth)
+        if let composer = textFields.first(where: isLikelyMessageComposer) {
+            return composer
+        }
+        if let composer = textFields.first {
+            return composer
+        }
+        return nil
+    }
+
+    private static func isLikelyMessageComposer(_ element: AXUIElement) -> Bool {
+        let desc = (description(element) ?? "").lowercased()
+        return desc.contains("enter a message") ||
+            desc.contains("message") ||
+            desc.contains("메시지")
+    }
+
     /// Find the AXRow in a chat list whose name label matches the given text.
     /// Older/newer KakaoTalk builds vary between AXTable and AXOutline and may
     /// expose the visible name as "_NS:18", "Display Name", or a plain static text.

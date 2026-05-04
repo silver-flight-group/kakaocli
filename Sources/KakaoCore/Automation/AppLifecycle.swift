@@ -201,23 +201,10 @@ public enum AppLifecycle {
         case .notRunning:
             fputs("Launching KakaoTalk...\n", stderr)
             try launch()
-            let afterLaunch = waitForAnyState([.loggedIn, .loginScreen, .updateRequired], timeout: 15.0)
-            if afterLaunch == .loggedIn { return }
-            if afterLaunch == .updateRequired { throw LifecycleError.updateRequired }
-            if afterLaunch == .loginScreen {
-                try attemptLogin(credentials: credentials)
-                return
-            }
-            throw LifecycleError.launchTimeout
+            try waitForReadyAfterLaunch(credentials: credentials)
 
         case .launching:
-            let afterWait = waitForAnyState([.loggedIn, .loginScreen, .updateRequired], timeout: 15.0)
-            if afterWait == .loggedIn { return }
-            if afterWait == .loginScreen {
-                try attemptLogin(credentials: credentials)
-                return
-            }
-            throw LifecycleError.launchTimeout
+            try waitForReadyAfterLaunch(credentials: credentials)
 
         case .loginScreen:
             try attemptLogin(credentials: credentials)
@@ -231,6 +218,41 @@ public enum AppLifecycle {
     }
 
     // MARK: - Private
+
+    private static func waitForReadyAfterLaunch(
+        credentials: CredentialStore?,
+        timeout: TimeInterval = 15.0
+    ) throws {
+        let afterWait = waitForAnyState([.loggedIn, .loginScreen, .updateRequired], timeout: timeout)
+        switch afterWait {
+        case .loggedIn:
+            try ensureWindowVisible()
+            return
+        case .loginScreen:
+            try attemptLogin(credentials: credentials)
+            return
+        case .updateRequired:
+            throw LifecycleError.updateRequired
+        case .notRunning, .launching, .unknown:
+            break
+        }
+
+        // KakaoTalk can be logged in but expose no AXWindow right after launch.
+        // Re-run the state detector in aggressive mode so it may reveal the menu-bar-only window.
+        let afterReveal = detectState(aggressive: true)
+        switch afterReveal {
+        case .loggedIn:
+            try ensureWindowVisible()
+            return
+        case .loginScreen:
+            try attemptLogin(credentials: credentials)
+            return
+        case .updateRequired:
+            throw LifecycleError.updateRequired
+        case .notRunning, .launching, .unknown:
+            throw LifecycleError.launchTimeout
+        }
+    }
 
     /// Ensure KakaoTalk's main window is visible with the chat list accessible.
     /// KakaoTalk sometimes hides its window even when logged in.
