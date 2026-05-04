@@ -11,7 +11,16 @@ public final class KakaoAutomator {
     /// Send a message to a chat by navigating the UI.
     public func sendMessage(to chatName: String, message: String, selfChat: Bool = false) throws {
         let session = try openConversation(to: chatName, selfChat: selfChat)
+        try sendMessage(message: message, in: session)
+    }
 
+    /// Send a message to the chat row at a known database/UI index.
+    public func sendMessage(toChatAtIndex index: Int, targetDescription: String, message: String) throws {
+        let session = try openConversation(toChatAtIndex: index, targetDescription: targetDescription)
+        try sendMessage(message: message, in: session)
+    }
+
+    private func sendMessage(message: String, in session: ConversationSession) throws {
         // Wait briefly for the message composer to become available.
         let inputDeadline = Date().addingTimeInterval(10.0)
         var activeContainer = session.conversationContainer
@@ -99,11 +108,42 @@ public final class KakaoAutomator {
         let conversationContainer: AXUIElement
     }
 
+    private enum ChatTarget {
+        case name(String, exact: Bool)
+        case rowIndex(Int, description: String)
+        case selfChat
+
+        var description: String {
+            switch self {
+            case .name(let name, _):
+                return name
+            case .rowIndex(_, let description):
+                return description
+            case .selfChat:
+                return "self-chat (나와의 채팅)"
+            }
+        }
+    }
+
     private func openConversation(
         to chatName: String,
         selfChat: Bool,
         exactChatName: Bool = false
     ) throws -> ConversationSession {
+        if selfChat {
+            return try openConversation(target: .selfChat)
+        }
+        return try openConversation(target: .name(chatName, exact: exactChatName))
+    }
+
+    private func openConversation(
+        toChatAtIndex index: Int,
+        targetDescription: String
+    ) throws -> ConversationSession {
+        try openConversation(target: .rowIndex(index, description: targetDescription))
+    }
+
+    private func openConversation(target: ChatTarget) throws -> ConversationSession {
         let stateBefore = AppLifecycle.detectState()
         try AppLifecycle.ensureReady(credentials: CredentialStore())
         if stateBefore != .loggedIn {
@@ -135,16 +175,17 @@ public final class KakaoAutomator {
         }
 
         guard let table = AXHelpers.chatListTable(mainWindow) else {
-            throw AutomationError.chatNotFound(chatName)
+            throw AutomationError.chatNotFound(target.description)
         }
 
         let row: AXUIElement
-        if selfChat {
+        switch target {
+        case .selfChat:
             guard let selfRow = AXHelpers.findSelfChatRow(table) else {
                 throw AutomationError.chatNotFound("self-chat (나와의 채팅)")
             }
             row = selfRow
-        } else {
+        case .name(let chatName, let exactChatName):
             let chatRows = AXHelpers.findChatRows(table, chatName: chatName, exact: exactChatName)
             guard !chatRows.isEmpty, let chatRow = chatRows.first else {
                 throw AutomationError.chatNotFound(chatName)
@@ -153,6 +194,12 @@ public final class KakaoAutomator {
                 throw AutomationError.ambiguousChatName(chatName, chatRows.count)
             }
             row = chatRow
+        case .rowIndex(let index, let description):
+            let rows = AXHelpers.children(table).filter { AXHelpers.role($0) == "AXRow" }
+            guard index >= 0 && index < rows.count else {
+                throw AutomationError.chatNotFound(description)
+            }
+            row = rows[index]
         }
 
         func waitForConversationContainer(timeout: TimeInterval = 2.0) -> AXUIElement? {
@@ -183,6 +230,7 @@ public final class KakaoAutomator {
             conversationContainer = waitForConversationContainer()
         }
         if conversationContainer == nil,
+           case .name(let chatName, _) = target,
            let nameLabel = AXHelpers.findFirst(row, role: "AXStaticText", text: chatName, maxDepth: 4) {
             AXHelpers.doubleClickElement(nameLabel)
             conversationContainer = waitForConversationContainer()
