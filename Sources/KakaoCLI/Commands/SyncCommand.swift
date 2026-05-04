@@ -26,8 +26,17 @@ struct SyncCommand: ParsableCommand {
     @Option(name: .long, help: "Database encryption key")
     var key: String?
 
+    @Option(name: .long, help: "Override user ID instead of reading from plist")
+    var userId: Int?
+
+    @Option(name: .long, help: "Only emit group chat messages that start with this mention tag; direct chats are unaffected. May be repeated.")
+    var groupMentionTag: [String] = []
+
     func run() throws {
-        let (path, secureKey) = try resolveDatabasePath(dbPath: db, key: key)
+        let (path, secureKey) = try resolveDatabasePath(dbPath: db, key: key, userId: userId)
+        let groupMentionTags = groupMentionTag
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         if !follow && webhook == nil {
             // One-shot: show current high-water mark
@@ -51,7 +60,8 @@ struct SyncCommand: ParsableCommand {
             databasePath: path,
             key: secureKey,
             pollInterval: interval,
-            startFromLogId: sinceLogId
+            startFromLogId: sinceLogId,
+            groupMentionTags: groupMentionTags
         )
 
         // Handle Ctrl-C gracefully
@@ -61,6 +71,10 @@ struct SyncCommand: ParsableCommand {
         }
 
         fputs("Watching for new messages (poll every \(interval)s)...\n", stderr)
+        if !groupMentionTags.isEmpty {
+            let filterDescription = groupMentionTags.joined(separator: ", ")
+            fputs("Group mention filter: \(filterDescription)\n", stderr)
+        }
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -90,14 +104,14 @@ struct SyncCommand: ParsableCommand {
 }
 
 /// Resolve database path and key without opening the database.
-func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String, key: String?) {
+func resolveDatabasePath(dbPath: String?, key: String?, userId userIdOverride: Int? = nil) throws -> (path: String, key: String?) {
     if let dbPath {
         return (dbPath, key)
     }
     let uuid = try DeviceInfo.platformUUID()
 
     // Try standard path: derive userId → derive dbName → find file
-    if let uid = try? DeviceInfo.userId() {
+    if let uid = try? (userIdOverride ?? DeviceInfo.userId()) {
         let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
         let candidates = [
             "\(DeviceInfo.containerPath)/\(dbName)",
@@ -111,7 +125,7 @@ func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String,
 
     // Fallback: scan for DB file, try candidate userIds for the key
     guard let discoveredPath = DeviceInfo.discoverDatabaseFile() else {
-        let uid = try DeviceInfo.userId()
+        let uid = try userIdOverride ?? DeviceInfo.userId()
         let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
         throw KakaoError.databaseNotFound("\(DeviceInfo.containerPath)/\(dbName)")
     }
@@ -121,8 +135,14 @@ func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String,
     }
 
     // Try candidate userIds to find a working key
-    var candidateIds = (try? DeviceInfo.userId()).map { [$0] } ?? [Int]()
-    candidateIds += DeviceInfo.candidateUserIds().filter { !candidateIds.contains($0) }
+    let candidateIds: [Int]
+    if let override = userIdOverride {
+        candidateIds = [override]
+    } else {
+        var ids = (try? DeviceInfo.userId()).map { [$0] } ?? [Int]()
+        ids += DeviceInfo.candidateUserIds().filter { !ids.contains($0) }
+        candidateIds = ids
+    }
     for uid in candidateIds {
         let candidateKey = KeyDerivation.secureKey(userId: uid, uuid: uuid)
         let reader = DatabaseReader(databasePath: discoveredPath)
