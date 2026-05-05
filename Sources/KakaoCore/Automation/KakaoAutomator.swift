@@ -9,8 +9,13 @@ public final class KakaoAutomator {
     public init() {}
 
     /// Send a message to a chat by navigating the UI.
-    public func sendMessage(to chatName: String, message: String, selfChat: Bool = false) throws {
-        let session = try openConversation(to: chatName, selfChat: selfChat)
+    public func sendMessage(
+        to chatName: String,
+        message: String,
+        selfChat: Bool = false,
+        exactChatName: Bool = false
+    ) throws {
+        let session = try openConversation(to: chatName, selfChat: selfChat, exactChatName: exactChatName)
         try sendMessage(message: message, in: session)
     }
 
@@ -65,11 +70,21 @@ public final class KakaoAutomator {
     /// Leave a group chat through KakaoTalk's chat window menu.
     public func leaveChat(to chatName: String) throws {
         let session = try openConversation(to: chatName, selfChat: false, exactChatName: true)
+        try leaveChat(in: session, targetDescription: chatName)
+    }
+
+    /// Leave a group chat using a known chat row index.
+    public func leaveChat(atChatIndex index: Int, targetDescription: String) throws {
+        let session = try openConversation(toChatAtIndex: index, targetDescription: targetDescription)
+        try leaveChat(in: session, targetDescription: targetDescription)
+    }
+
+    private func leaveChat(in session: ConversationSession, targetDescription: String) throws {
         _ = AXHelpers.performAction(session.conversationContainer, kAXRaiseAction as String)
         Thread.sleep(forTimeInterval: 0.3)
 
         guard let menuButton = findConversationMenuButton(in: session.conversationContainer) else {
-            throw AutomationError.menuButtonNotFound(chatName)
+            throw AutomationError.menuButtonNotFound(targetDescription)
         }
 
         if !AXHelpers.performAction(menuButton, kAXPressAction as String) {
@@ -82,7 +97,7 @@ public final class KakaoAutomator {
             labels: ["Leave chatroom", "Leave Chatroom", "Leave Chat", "채팅방 나가기", "나가기"],
             timeout: 3.0
         ) else {
-            throw AutomationError.leaveMenuItemNotFound(chatName)
+            throw AutomationError.leaveMenuItemNotFound(targetDescription)
         }
         if !AXHelpers.performAction(leaveItem, kAXPressAction as String) {
             AXHelpers.clickElement(leaveItem)
@@ -98,7 +113,7 @@ public final class KakaoAutomator {
                 AXHelpers.clickElement(confirmButton)
             }
         } else if hasConfirmationPrompt(in: session.app) {
-            throw AutomationError.leaveConfirmationButtonNotFound(chatName)
+            throw AutomationError.leaveConfirmationButtonNotFound(targetDescription)
         }
     }
 
