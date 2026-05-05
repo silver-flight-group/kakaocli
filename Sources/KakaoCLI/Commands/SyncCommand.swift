@@ -29,7 +29,7 @@ struct SyncCommand: ParsableCommand {
     @Option(name: .long, help: "Override user ID instead of reading from plist")
     var userId: Int?
 
-    @Option(name: .long, help: "Only emit group chat messages that start with this mention tag; direct chats are unaffected. May be repeated.")
+    @Option(name: .long, help: "Only emit group chat messages that contain this mention tag; direct chats are unaffected. May be repeated.")
     var groupMentionTag: [String] = []
 
     func run() throws {

@@ -214,7 +214,7 @@ public final class DatabaseReader: @unchecked Sendable {
         if !mentionTags.isEmpty {
             var mentionClauses: [String] = []
             for tag in mentionTags {
-                appendMentionPrefixPredicates(tag: tag, clauses: &mentionClauses, bindings: &bindings)
+                appendMentionPredicates(tag: tag, clauses: &mentionClauses, bindings: &bindings)
             }
             conditions.append(
                 "(r.type = 0 OR r.directChatMemberUserId IS NOT NULL OR (\(mentionClauses.joined(separator: " OR "))))"
@@ -252,18 +252,17 @@ public final class DatabaseReader: @unchecked Sendable {
         }
     }
 
-    private func appendMentionPrefixPredicates(
+    private func appendMentionPredicates(
         tag: String,
         clauses: inout [String],
         bindings: inout [SQLValue]
     ) {
-        let escapedTag = escapeLikePattern(tag)
-        clauses.append("m.message = ?")
-        bindings.append(.string(tag))
-        for separator in [" ", "\t", "\n", "\r", ",", ":", "-"] {
-            clauses.append("m.message LIKE ? ESCAPE '\\'")
-            bindings.append(.string("\(escapedTag)\(separator)%"))
-        }
+        clauses.append("m.message LIKE ? ESCAPE '\\'")
+        bindings.append(.string(buildMentionContainsLikePattern(tag)))
+    }
+
+    func buildMentionContainsLikePattern(_ raw: String) -> String {
+        "%\(escapeLikePattern(raw))%"
     }
 
     private func escapeLikePattern(_ raw: String) -> String {
