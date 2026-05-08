@@ -20,8 +20,11 @@ struct ChatsCommand: ParsableCommand {
     @Option(name: .long, help: "Database encryption key (auto-derived if not set)")
     var key: String?
 
+    @Option(name: .long, help: "Override user ID instead of reading from plist")
+    var userId: Int?
+
     func run() throws {
-        let reader = try openDatabase(dbPath: db, key: key)
+        let reader = try openDatabase(dbPath: db, key: key, userId: userId)
         defer { reader.close() }
 
         let chats = try reader.chats(limit: limit)

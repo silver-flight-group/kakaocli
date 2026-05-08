@@ -186,25 +186,80 @@ public enum AXHelpers {
         return nil
     }
 
+    /// Find the message composer for a conversation window or inline chat view.
+    /// The composer usually lives inside a scroll area that does not contain the
+    /// message table, but some KakaoTalk builds expose it only via a deeper global search.
+    public static func findMessageComposer(in window: AXUIElement) -> AXUIElement? {
+        for child in children(window) {
+            guard role(child) == "AXScrollArea" else { continue }
+            let hasTable = children(child).contains { role($0) == "AXTable" }
+            if !hasTable {
+                if let composer = findComposer(in: child, maxDepth: 4) {
+                    return composer
+                }
+            }
+        }
+        return findComposer(in: window, maxDepth: 8)
+    }
+
+    private static func findComposer(in element: AXUIElement, maxDepth: Int) -> AXUIElement? {
+        let textAreas = findAll(element, role: "AXTextArea", maxDepth: maxDepth)
+        if let composer = textAreas.first(where: isLikelyMessageComposer) {
+            return composer
+        }
+        if let composer = textAreas.first {
+            return composer
+        }
+
+        let textFields = findAll(element, role: "AXTextField", maxDepth: maxDepth)
+        if let composer = textFields.first(where: isLikelyMessageComposer) {
+            return composer
+        }
+        if let composer = textFields.first {
+            return composer
+        }
+        return nil
+    }
+
+    private static func isLikelyMessageComposer(_ element: AXUIElement) -> Bool {
+        let desc = (description(element) ?? "").lowercased()
+        return desc.contains("enter a message") ||
+            desc.contains("message") ||
+            desc.contains("메시지")
+    }
+
     /// Find the AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
+    /// Older/newer KakaoTalk builds vary between AXTable and AXOutline and may
+    /// expose the visible name as "_NS:18", "Display Name", or a plain static text.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
+        findChatRows(table, chatName: chatName, exact: exact).first
+    }
+
+    /// Find all AXRows in a chat list whose visible name label matches the given text.
+    public static func findChatRows(_ table: AXUIElement, chatName: String, exact: Bool = false) -> [AXUIElement] {
+        var rows: [AXUIElement] = []
         for row in children(table) {
             guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
-                        let name = value(child) ?? ""
-                        let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
-                        if matches {
-                            return row
-                        }
+                    guard role(child) == "AXStaticText" else { continue }
+                    let name = value(child) ?? title(child) ?? ""
+                    let id = identifier(child) ?? ""
+                    let likelyDisplayName =
+                        id == "_NS:18" ||
+                        id == "Display Name" ||
+                        (!name.isEmpty && id != "_NS:73" && id != "_NS:93")
+                    guard likelyDisplayName else { continue }
+                    let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
+                    if matches {
+                        rows.append(row)
+                        break
                     }
                 }
             }
         }
-        return nil
+        return rows
     }
 
     /// Find the self-chat row (identified by "badge me" image in the cell).
@@ -269,13 +324,14 @@ public enum AXHelpers {
         return false
     }
 
-    /// Get the AXTable (chat list) from the main window.
+    /// Get the chat list container from the main window.
+    /// KakaoTalk currently exposes this as AXTable on some builds and AXOutline on others.
     public static func chatListTable(_ window: AXUIElement) -> AXUIElement? {
-        // Structure: AXWindow > AXScrollArea > AXTable
+        // Structure: AXWindow > AXScrollArea > AXTable/AXOutline
         for child in children(window) {
             if role(child) == "AXScrollArea" {
                 for subchild in children(child) {
-                    if role(subchild) == "AXTable" {
+                    if role(subchild) == "AXTable" || role(subchild) == "AXOutline" {
                         return subchild
                     }
                 }
@@ -289,7 +345,7 @@ public enum AXHelpers {
         for child in children(window) {
             if role(child) == "AXScrollArea" {
                 for subchild in children(child) {
-                    if role(subchild) == "AXTable" {
+                    if role(subchild) == "AXTable" || role(subchild) == "AXOutline" {
                         return child
                     }
                 }

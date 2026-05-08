@@ -33,15 +33,60 @@ struct InspectCommand: ParsableCommand {
                 print("Could not find main window")
                 throw ExitCode.failure
             }
-            if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") {
+            func waitForConversationOpen(timeout: TimeInterval = 2.0) -> Bool {
+                let deadline = Date().addingTimeInterval(timeout)
+                while Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.25)
+                    let updatedWindows = AXHelpers.windows(app)
+                    if updatedWindows.contains(where: { AXHelpers.identifier($0) != "Main Window" }) {
+                        return true
+                    }
+                    if AXHelpers.findMessageComposer(in: mainWindow) != nil {
+                        return true
+                    }
+                }
+                return false
+            }
+            let chatroomsTab =
+                AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") ??
+                AXHelpers.findFirst(mainWindow, role: "AXButton", identifier: "chatrooms")
+            if let chatroomsTab {
                 _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
                 Thread.sleep(forTimeInterval: 0.3)
             }
             if let table = AXHelpers.chatListTable(mainWindow) {
                 if let row = AXHelpers.findChatRow(table, chatName: chatName) {
-                    print("Found chat: \(chatName), double-clicking to open...")
-                    AXHelpers.doubleClickElement(row)
-                    Thread.sleep(forTimeInterval: 1.0)
+                    print("Found chat: \(chatName), opening...")
+                    var opened = false
+                    if AXHelpers.selectRow(row, in: table) {
+                        Thread.sleep(forTimeInterval: 0.2)
+                        AXHelpers.pressKey(keyCode: 36)
+                        opened = waitForConversationOpen()
+                    }
+                    if !opened {
+                        AXHelpers.clickElement(row)
+                        Thread.sleep(forTimeInterval: 0.2)
+                        AXHelpers.pressKey(keyCode: 36)
+                        opened = waitForConversationOpen()
+                    }
+                    if !opened,
+                       let nameLabel = AXHelpers.findFirst(row, role: "AXStaticText", text: chatName, maxDepth: 4) {
+                        AXHelpers.doubleClickElement(nameLabel)
+                        opened = waitForConversationOpen()
+                    }
+                    if !opened,
+                       let cell = AXHelpers.children(row).first(where: { AXHelpers.role($0) == "AXCell" }) {
+                        AXHelpers.doubleClickElement(cell)
+                        opened = waitForConversationOpen()
+                    }
+                    if !opened {
+                        if let scrollArea = AXHelpers.chatListScrollArea(mainWindow) {
+                            _ = AXHelpers.scrollRowToVisible(row, in: scrollArea)
+                            Thread.sleep(forTimeInterval: 0.3)
+                        }
+                        AXHelpers.doubleClickElement(row)
+                        opened = waitForConversationOpen(timeout: 5.0)
+                    }
                 } else {
                     print("Chat '\(chatName)' not found in chat list")
                     throw ExitCode.failure
@@ -49,6 +94,9 @@ struct InspectCommand: ParsableCommand {
             }
             // Re-fetch windows after opening chat
             let updatedWindows = AXHelpers.windows(app)
+            if AXHelpers.findMessageComposer(in: mainWindow) != nil {
+                print("Detected inline composer in Main Window.")
+            }
             for (i, window) in updatedWindows.enumerated() {
                 let title = AXHelpers.title(window) ?? "(untitled)"
                 print("=== Window \(i): \(title) ===")

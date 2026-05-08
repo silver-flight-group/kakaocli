@@ -13,9 +13,11 @@ struct StatusCommand: ParsableCommand {
         let containerExists = FileManager.default.fileExists(atPath: DeviceInfo.containerPath)
         let globalPlistExists = FileManager.default.fileExists(atPath: DeviceInfo.preferencesPath)
         let containerPlistExists = FileManager.default.fileExists(atPath: DeviceInfo.containerPreferencesPath)
+        let permissionReport = AutomationPermissions.report()
 
         print("KakaoTalk Status")
         print("================")
+        print("Binary path:        \(permissionReport.binaryPath)")
         print("App installed:      \(FileManager.default.fileExists(atPath: appPath) ? "Yes" : "No")")
         print("Container exists:   \(containerExists ? "Yes" : "No")")
         print("Preferences exist:  \(globalPlistExists || containerPlistExists ? "Yes" : "No")\(containerPlistExists && !globalPlistExists ? " (container only)" : "")")
@@ -61,6 +63,11 @@ struct StatusCommand: ParsableCommand {
         print("-----------")
         let hasFullDisk = containerExists && FileManager.default.isReadableFile(atPath: DeviceInfo.containerPath)
         print("Full Disk Access:   \(hasFullDisk ? "Likely OK" : "May be needed")")
+        print("Accessibility:      \(permissionReport.accessibilityTrusted ? "Granted" : "Not granted")")
+        print("System Events:      \(permissionReport.systemEventsAutomation.label)")
+        if let details = permissionReport.systemEventsAutomation.details, !details.isEmpty {
+            print("  Detail:           \(details)")
+        }
 
         // App lifecycle
         print("\nApp Lifecycle")

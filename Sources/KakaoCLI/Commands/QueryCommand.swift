@@ -17,8 +17,11 @@ struct QueryCommand: ParsableCommand {
     @Option(name: .long, help: "Database encryption key")
     var key: String?
 
+    @Option(name: .long, help: "Override user ID instead of reading from plist")
+    var userId: Int?
+
     func run() throws {
-        let reader = try openDatabase(dbPath: db, key: key)
+        let reader = try openDatabase(dbPath: db, key: key, userId: userId)
         defer { reader.close() }
 
         let results = try reader.rawQuery(sql)

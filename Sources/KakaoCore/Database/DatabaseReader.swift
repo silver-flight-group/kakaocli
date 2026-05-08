@@ -201,7 +201,26 @@ public final class DatabaseReader: @unchecked Sendable {
 
     /// Get messages with logId strictly greater than the given value.
     /// Returns SyncMessage structs suitable for JSON streaming.
-    public func messagesSince(logId: Int64, myUserId: Int64) throws -> [SyncMessage] {
+    public func messagesSince(
+        logId: Int64,
+        myUserId: Int64,
+        groupMentionTags: [String] = []
+    ) throws -> [SyncMessage] {
+        let mentionTags = groupMentionTags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var conditions = ["m.logId > ?"]
+        var bindings: [SQLValue] = [.int64(logId)]
+        if !mentionTags.isEmpty {
+            var mentionClauses: [String] = []
+            for tag in mentionTags {
+                appendMentionPredicates(tag: tag, clauses: &mentionClauses, bindings: &bindings)
+            }
+            conditions.append(
+                "(r.type = 0 OR r.directChatMemberUserId IS NOT NULL OR (\(mentionClauses.joined(separator: " OR "))))"
+            )
+        }
+        let whereClause = conditions.joined(separator: " AND ")
         let sql = """
             SELECT m.logId, m.chatId,
                    COALESCE(r.chatName, u.displayName, u.friendNickName, u.nickName) as chatName,
@@ -212,12 +231,12 @@ public final class DatabaseReader: @unchecked Sendable {
             LEFT JOIN NTChatRoom r ON m.chatId = r.chatId
             LEFT JOIN NTUser u ON r.directChatMemberUserId = u.userId AND u.linkId = 0
             LEFT JOIN NTUser u2 ON m.authorId = u2.userId AND u2.linkId = 0
-            WHERE m.logId > ?
+            WHERE \(whereClause)
             ORDER BY m.logId ASC
             LIMIT 100
             """
         let formatter = ISO8601DateFormatter()
-        return try query(sql, bind: [.int64(logId)]) { row in
+        return try query(sql, bind: bindings) { row in
             SyncMessage(
                 type: "message",
                 logId: row.int64(0),
@@ -231,6 +250,26 @@ public final class DatabaseReader: @unchecked Sendable {
                 isFromMe: row.int64(3) == myUserId
             )
         }
+    }
+
+    private func appendMentionPredicates(
+        tag: String,
+        clauses: inout [String],
+        bindings: inout [SQLValue]
+    ) {
+        clauses.append("m.message LIKE ? ESCAPE '\\'")
+        bindings.append(.string(buildMentionContainsLikePattern(tag)))
+    }
+
+    func buildMentionContainsLikePattern(_ raw: String) -> String {
+        "%\(escapeLikePattern(raw))%"
+    }
+
+    private func escapeLikePattern(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
     }
 
     /// Run an arbitrary read-only SQL query and return results as arrays of Any.

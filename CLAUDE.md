@@ -8,6 +8,12 @@ swift test
 ```
 
 No external dependencies besides `sqlcipher` (Homebrew). The `CSQLCipher` system library target wraps it via pkg-config.
+On this Mac mini, `pkg-config` may be absent even though Homebrew `sqlcipher` is installed. In that case use explicit link flags:
+
+```bash
+swift test -Xcc -I/opt/homebrew/opt/sqlcipher/include -Xlinker -L/opt/homebrew/opt/sqlcipher/lib -Xlinker -lsqlcipher -Xlinker -rpath -Xlinker /opt/homebrew/opt/sqlcipher/lib
+swift build -c release -Xcc -I/opt/homebrew/opt/sqlcipher/include -Xlinker -L/opt/homebrew/opt/sqlcipher/lib -Xlinker -lsqlcipher -Xlinker -rpath -Xlinker /opt/homebrew/opt/sqlcipher/lib
+```
 
 ## Project Structure
 
@@ -71,6 +77,10 @@ No external dependencies besides `sqlcipher` (Homebrew). The `CSQLCipher` system
 ### Query Command
 - `kakaocli query "SELECT ..."` — runs raw read-only SQL against the decrypted DB, returns JSON array of arrays.
 - Useful for ad-hoc data extraction (e.g., member lists, message stats, schema exploration).
+
+### Sync Command
+- `kakaocli sync --group-mention-tag @클로` emits direct-chat messages normally but only emits group-chat messages that start with that mention tag. This keeps unmentioned group text out of the OpenClaw Node bridge stream.
+- The mention tag option may be repeated. Prefix matching accepts the exact tag alone or followed by whitespace, comma, colon, or dash.
 
 ### Debugging UI Automation
 - **Use `peekaboo` for screenshots**: `peekaboo image --window-id <ID> --no-remote --path /tmp/debug.png`
