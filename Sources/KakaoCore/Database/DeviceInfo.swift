@@ -49,6 +49,34 @@ public enum DeviceInfo {
         return "\(prefDir)/com.kakao.KakaoTalkMac.plist"
     }
 
+    /// Path to the userId resolution cache (avoids repeated SHA-512 brute force).
+    /// Stores the recovered userId keyed by the active account hash, so cache
+    /// auto-invalidates when the user logs in as a different account.
+    public static var cachePath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.cache/kakaocli/userid.json"
+    }
+
+    private static func readUserIdCache(for hash: String) -> Int? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: cachePath)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cachedHash = obj["hash"] as? String,
+              cachedHash == hash,
+              let uid = obj["userId"] as? Int
+        else { return nil }
+        return uid
+    }
+
+    private static func writeUserIdCache(userId: Int, hash: String) {
+        let dir = (cachePath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let payload: [String: Any] = ["userId": userId, "hash": hash]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? data.write(to: URL(fileURLWithPath: cachePath))
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cachePath)
+        }
+    }
+
     /// Extract user ID from the KakaoTalk preferences plist.
     ///
     /// Tries multiple strategies in order:
@@ -89,7 +117,11 @@ public enum DeviceInfo {
             // "DESIGNATEDFRIENDSREVISION:<sha512hex>". The active account has non-zero values.
             // We brute-force the pre-image since userIds are typically small integers.
             if let hash = activeAccountHash(from: plist) {
+                if let cached = readUserIdCache(for: hash) {
+                    return cached
+                }
                 if let id = recoverUserIdFromSHA512(hexHash: hash) {
+                    writeUserIdCache(userId: id, hash: hash)
                     return id
                 }
             }
@@ -192,36 +224,51 @@ public enum DeviceInfo {
     }
 
     /// Recover a userId by brute-forcing the SHA-512 pre-image.
-    /// KakaoTalk stores SHA-512(userId) as hex in plist keys. Since userIds are
-    /// typically small integers, this is fast (< 1 second for IDs under 1M).
-    /// Searches up to 1 billion with a 10-second timeout.
+    /// KakaoTalk stores SHA-512(userId) as hex in plist keys. Parallelized across
+    /// available CPU cores via DispatchQueue.concurrentPerform — covers up to
+    /// 1 billion user IDs in seconds on Apple Silicon. 60-second safety timeout.
     public static func recoverUserIdFromSHA512(hexHash: String) -> Int? {
         guard hexHash.count == 128 else { return nil }
-        // Parse target hash to bytes
-        var targetBytes = [UInt8](repeating: 0, count: 64)
-        var hexChars = Array(hexHash)
+        let hexChars = Array(hexHash)
+        var targetBytesArr = [UInt8](repeating: 0, count: 64)
         for i in 0..<64 {
             guard let byte = UInt8(String(hexChars[i*2...i*2+1]), radix: 16) else { return nil }
-            targetBytes[i] = byte
+            targetBytesArr[i] = byte
         }
+        let targetBytes = targetBytesArr
 
-        let startTime = CFAbsoluteTimeGetCurrent()
         let maxId = 1_000_000_000
-        var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+        let chunkSize = 500_000
+        let totalChunks = (maxId + chunkSize - 1) / chunkSize
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let state = _RecoveryState()
 
-        for i in 0..<maxId {
-            let s = String(i)
-            let data = Array(s.utf8)
-            CC_SHA512(data, CC_LONG(data.count), &hash)
-            if hash == targetBytes {
-                return i
-            }
-            // Timeout after 10 seconds
-            if i % 5_000_000 == 0 && i > 0 {
-                if CFAbsoluteTimeGetCurrent() - startTime > 10 { return nil }
+        DispatchQueue.concurrentPerform(iterations: totalChunks) { chunkIdx in
+            if state.shouldStop { return }
+
+            let start = chunkIdx * chunkSize
+            let end = min(start + chunkSize, maxId)
+            var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+
+            for i in start..<end {
+                let s = String(i)
+                let data = Array(s.utf8)
+                CC_SHA512(data, CC_LONG(data.count), &hash)
+                if hash == targetBytes {
+                    state.claim(i)
+                    return
+                }
+                if i & 0x1FFFF == 0 {
+                    if state.shouldStop { return }
+                    if CFAbsoluteTimeGetCurrent() - startTime > 60 {
+                        state.requestStop()
+                        return
+                    }
+                }
             }
         }
-        return nil
+
+        return state.found
     }
 
     private static func longestCommonSuffix(_ strings: [String]) -> String? {
@@ -238,6 +285,38 @@ public enum DeviceInfo {
         }
         guard commonLen > 0 else { return nil }
         return String(first.suffix(commonLen))
+    }
+}
+
+/// Thread-safe shared state for parallel SHA-512 brute-force recovery.
+/// Wraps mutable fields in a class so DispatchQueue.concurrentPerform closures
+/// capture by reference (silencing Swift 6 Sendable closure-capture warnings).
+private final class _RecoveryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _found: Int?
+    private var _stop: Bool = false
+
+    var shouldStop: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _stop
+    }
+
+    var found: Int? {
+        lock.lock(); defer { lock.unlock() }
+        return _found
+    }
+
+    func claim(_ id: Int) {
+        lock.lock(); defer { lock.unlock() }
+        if _found == nil {
+            _found = id
+            _stop = true
+        }
+    }
+
+    func requestStop() {
+        lock.lock(); defer { lock.unlock() }
+        _stop = true
     }
 }
 
