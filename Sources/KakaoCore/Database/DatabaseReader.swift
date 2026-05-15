@@ -193,7 +193,12 @@ public final class DatabaseReader: @unchecked Sendable {
 
     /// Get the maximum logId in the messages table (used by DatabaseWatcher).
     public func maxLogId() throws -> Int64 {
-        let results = try query("SELECT MAX(logId) FROM NTChatMessage", bind: []) { row in
+        // logId = Int64.max는 KakaoTalk Mac의 in-flight placeholder (서버 ack 전).
+        // 그 값을 cursor seed로 잡으면 sync가 즉시 silent wedge 상태에 빠짐.
+        let results = try query(
+            "SELECT MAX(logId) FROM NTChatMessage WHERE logId != ?",
+            bind: [.int64(Int64.max)]
+        ) { row in
             row.optionalInt64(0)
         }
         return results.first.flatMap { $0 } ?? 0

@@ -37,11 +37,17 @@ public final class DatabaseWatcher: @unchecked Sendable {
         while running {
             do {
                 let messages = try fetchNewMessages()
-                if !messages.isEmpty {
-                    if let maxId = messages.map(\.logId).max() {
+                // KakaoTalk Mac은 송신 직후·서버 ack 전 상태의 메시지를 NTChatMessage에
+                // logId = Int64.max 임시 placeholder로 저장한다. 그 행을 cursor에 반영하면
+                // 이후 messagesSince(logId > Int64.max)가 영원히 빈 결과를 돌려줘 sync가
+                // silent wedge 상태에 빠진다. 다음 polling에서 실제 logId로 갱신된 같은
+                // 메시지를 다시 emit하므로 누락 위험도 없음.
+                let valid = messages.filter { $0.logId != Int64.max }
+                if !valid.isEmpty {
+                    if let maxId = valid.map(\.logId).max() {
                         lastLogId = maxId
                     }
-                    onMessages(messages)
+                    onMessages(valid)
                 }
             } catch {
                 onError(error)
