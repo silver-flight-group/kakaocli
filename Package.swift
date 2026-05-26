@@ -1,6 +1,12 @@
 // swift-tools-version: 6.0
 
+import Foundation
 import PackageDescription
+
+let sqlcipherPrefix = ProcessInfo.processInfo.environment["SQLCIPHER_PREFIX"]
+    ?? ["/opt/homebrew/opt/sqlcipher", "/usr/local/opt/sqlcipher"]
+        .first { FileManager.default.fileExists(atPath: "\($0)/include/sqlcipher/sqlite3.h") }
+    ?? "/opt/homebrew/opt/sqlcipher"
 
 let package = Package(
     name: "kakaocli",
@@ -22,7 +28,18 @@ let package = Package(
         ),
         .target(
             name: "KakaoCore",
-            dependencies: ["CSQLCipher"]
+            dependencies: ["CSQLCipher"],
+            swiftSettings: [
+                .unsafeFlags(["-Xcc", "-I\(sqlcipherPrefix)/include"]),
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L\(sqlcipherPrefix)/lib",
+                    "-lsqlcipher",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "\(sqlcipherPrefix)/lib",
+                ]),
+            ]
         ),
         .systemLibrary(
             name: "CSQLCipher",
