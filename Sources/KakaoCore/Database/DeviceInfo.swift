@@ -36,9 +36,13 @@ public enum DeviceInfo {
         let pipe = Pipe()
         process.standardOutput = pipe
         try process.run()
+
+        // Drain stdout before waiting so verbose ioreg output cannot fill the pipe
+        // and block the child process while we wait for it to exit.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = String(data: data, encoding: .utf8) ?? ""
         // Parse: "IOPlatformUUID" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
         guard let range = output.range(of: #""IOPlatformUUID" = "([^"]+)""#, options: .regularExpression),
               let uuidRange = output[range].range(of: #"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"#, options: .regularExpression)
