@@ -187,19 +187,23 @@ public enum AXHelpers {
     }
 
     /// Find the AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
+    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(name) ...
+    /// 채팅 이름 AXStaticText의 identifier는 KakaoTalk 버전마다 다르다(_NS:18, _NS:40 등).
+    /// 따라서 고정 id로 찾지 않고, 셀의 "첫 번째 AXStaticText"(=이름 라벨)만 검사한다.
+    /// 그 뒤에 오는 카운트/시간/미리보기 AXStaticText 와의 오매칭을 막기 위해 첫 항목에서 멈춘다.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
         for row in children(table) {
             guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
+                    if role(child) == "AXStaticText" {
                         let name = value(child) ?? ""
                         let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
                         if matches {
                             return row
                         }
+                        break  // 첫 AXStaticText(이름)만 본다
                     }
                 }
             }
