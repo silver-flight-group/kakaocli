@@ -49,14 +49,59 @@ public enum DeviceInfo {
         return "\(prefDir)/com.kakao.KakaoTalkMac.plist"
     }
 
-    /// Extract user ID from the KakaoTalk preferences plist.
+    /// Environment variable that forces a specific user ID, bypassing all detection.
+    public static let userIdEnvVar = "KAKAOCLI_USER_ID"
+
+    /// Path to the cached user ID file (`~/.kakaocli/userid.json`).
+    static var userIdCachePath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kakaocli")
+            .appendingPathComponent("userid.json").path
+    }
+
+    private struct CachedUserId: Codable {
+        var userId: Int
+        var accountHash: String?
+        var uuid: String?
+    }
+
+    /// Resolve the KakaoTalk user ID.
+    ///
+    /// Resolution order:
+    /// 1. `KAKAOCLI_USER_ID` environment variable (explicit override).
+    /// 2. Cached value from a previous run (validated against the active account).
+    /// 3. Plist detection (may brute-force a SHA-512 pre-image — slow, so the result is cached).
+    public static func userId() throws -> Int {
+        // 1. Explicit override — trusted, and cached so it survives across processes.
+        if let envId = userIdFromEnvironment() {
+            cacheUserId(envId)
+            return envId
+        }
+
+        // 2. Previously recovered value, revalidated so account switches self-heal.
+        if let cached = cachedUserId() {
+            return cached
+        }
+
+        // 3. Detect from the plist; persist whatever we find.
+        if let detected = try detectUserId() {
+            cacheUserId(detected)
+            return detected
+        }
+
+        throw KakaoError.userIdNotFound(["Could not extract from FSChatWindowTransparency, revision key SHA-512, or FSChatWindowFrame_ keys"])
+    }
+
+    /// Extract the user ID from the KakaoTalk preferences plist.
     ///
     /// Tries multiple strategies in order:
     /// 1. FSChatWindowTransparency common suffix (legacy)
     /// 2. Direct key lookup (userId, user_id, etc.)
-    /// 3. Recover userId by reversing SHA-512 hash from plist revision keys
+    /// 3. Recover userId by reversing the SHA-512 hash from plist revision keys
     /// 4. FSChatWindowFrame_ common suffix
-    public static func userId() throws -> Int {
+    ///
+    /// Returns `nil` if none of the strategies find a user ID.
+    private static func detectUserId() throws -> Int? {
         let plistPaths = [containerPreferencesPath, preferencesPath]
         for plistPath in plistPaths {
             guard FileManager.default.fileExists(atPath: plistPath) else { continue }
@@ -87,8 +132,13 @@ public enum DeviceInfo {
             // Strategy 3: Recover userId from SHA-512 hash in plist revision keys.
             // Newer KakaoTalk stores SHA-512(userId) as a suffix on keys like
             // "DESIGNATEDFRIENDSREVISION:<sha512hex>". The active account has non-zero values.
-            // We brute-force the pre-image since userIds are typically small integers.
             if let hash = activeAccountHash(from: plist) {
+                // Fast path: check known candidate IDs (instant) before brute-forcing.
+                if let match = candidateUserIds().first(where: { sha512Hex(String($0)) == hash }) {
+                    return match
+                }
+                // Slow path: brute-force the pre-image. userIds are integers, so this
+                // is bounded; it's parallelized and the result is cached by the caller.
                 if let id = recoverUserIdFromSHA512(hexHash: hash) {
                     return id
                 }
@@ -105,7 +155,77 @@ public enum DeviceInfo {
             }
         }
 
-        throw KakaoError.userIdNotFound(["Could not extract from FSChatWindowTransparency, revision key SHA-512, or FSChatWindowFrame_ keys"])
+        return nil
+    }
+
+    /// Read `KAKAOCLI_USER_ID` from the environment, if set to a positive integer.
+    private static func userIdFromEnvironment() -> Int? {
+        guard let raw = ProcessInfo.processInfo.environment[userIdEnvVar],
+              let id = Int(raw.trimmingCharacters(in: .whitespaces)), id > 0 else {
+            return nil
+        }
+        return id
+    }
+
+    /// Read a previously cached user ID, returning it only if it still matches the active account.
+    public static func cachedUserId() -> Int? {
+        guard let data = FileManager.default.contents(atPath: userIdCachePath),
+              let cached = try? JSONDecoder().decode(CachedUserId.self, from: data) else {
+            return nil
+        }
+        return isValidUserId(cached.userId) ? cached.userId : nil
+    }
+
+    /// Persist a recovered user ID so future runs skip detection entirely.
+    public static func cacheUserId(_ id: Int) {
+        guard id > 0 else { return }
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kakaocli")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let record = CachedUserId(userId: id, accountHash: activeAccountHash(), uuid: try? platformUUID())
+        if let data = try? JSONEncoder().encode(record) {
+            try? data.write(to: URL(fileURLWithPath: userIdCachePath))
+        }
+    }
+
+    /// Validate that a user ID belongs to the currently active account.
+    ///
+    /// Uses the cheap, definitive SHA-512 check when an account hash is available; otherwise
+    /// falls back to deriving the database filename and checking it exists on disk. This makes
+    /// a stale cache self-heal after an account switch instead of returning the wrong ID.
+    public static func isValidUserId(_ id: Int) -> Bool {
+        guard id > 0 else { return false }
+        if let hash = activeAccountHash() {
+            return sha512Hex(String(id)) == hash
+        }
+        // No account hash to compare against — verify by deriving the DB filename.
+        if let uuid = try? platformUUID() {
+            let dbName = KeyDerivation.databaseName(userId: id, uuid: uuid)
+            let candidates = ["\(containerPath)/\(dbName)", "\(containerPath)/\(dbName).db"]
+            if candidates.contains(where: { FileManager.default.fileExists(atPath: $0) }) {
+                return true
+            }
+            // If no database is discoverable at all, we can't disprove the cache — trust it.
+            return discoverDatabaseFile() == nil
+        }
+        return true
+    }
+
+    /// Hex-encoded SHA-512 of a string.
+    static func sha512Hex(_ s: String) -> String {
+        let data = Array(s.utf8)
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+        CC_SHA512(data, CC_LONG(data.count), &hash)
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Default brute-force timeout in seconds. Override with `KAKAOCLI_USERID_TIMEOUT`.
+    static var defaultBruteForceTimeout: Double {
+        if let raw = ProcessInfo.processInfo.environment["KAKAOCLI_USERID_TIMEOUT"],
+           let val = Double(raw), val > 0 {
+            return val
+        }
+        return 180
     }
 
     /// Read AlertKakaoIDsList from plist as candidate user IDs.
@@ -192,36 +312,79 @@ public enum DeviceInfo {
     }
 
     /// Recover a userId by brute-forcing the SHA-512 pre-image.
-    /// KakaoTalk stores SHA-512(userId) as hex in plist keys. Since userIds are
-    /// typically small integers, this is fast (< 1 second for IDs under 1M).
-    /// Searches up to 1 billion with a 10-second timeout.
-    public static func recoverUserIdFromSHA512(hexHash: String) -> Int? {
+    ///
+    /// KakaoTalk stores SHA-512(userId) as hex in plist keys. userIds are integers, so the
+    /// pre-image is recoverable by search. The work is split across all CPU cores and reports
+    /// progress to stderr; large IDs (hundreds of millions) resolve in seconds to tens of
+    /// seconds. Callers should cache the result so this runs at most once.
+    ///
+    /// - Parameters:
+    ///   - hexHash: 128-char hex SHA-512 digest to invert.
+    ///   - timeout: Wall-clock budget in seconds (default: `KAKAOCLI_USERID_TIMEOUT` or 180).
+    ///   - maxId: Upper bound (exclusive) for the search.
+    public static func recoverUserIdFromSHA512(hexHash: String,
+                                               timeout: Double? = nil,
+                                               maxId: Int = 1_000_000_000) -> Int? {
         guard hexHash.count == 128 else { return nil }
         // Parse target hash to bytes
         var targetBytes = [UInt8](repeating: 0, count: 64)
-        var hexChars = Array(hexHash)
+        let hexChars = Array(hexHash)
         for i in 0..<64 {
             guard let byte = UInt8(String(hexChars[i*2...i*2+1]), radix: 16) else { return nil }
             targetBytes[i] = byte
         }
 
+        let target = targetBytes  // immutable snapshot for the concurrent closure
+        let budget = timeout ?? defaultBruteForceTimeout
         let startTime = CFAbsoluteTimeGetCurrent()
-        let maxId = 1_000_000_000
-        var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+        let workers = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let state = BruteForceState()
 
-        for i in 0..<maxId {
-            let s = String(i)
-            let data = Array(s.utf8)
-            CC_SHA512(data, CC_LONG(data.count), &hash)
-            if hash == targetBytes {
-                return i
-            }
-            // Timeout after 10 seconds
-            if i % 5_000_000 == 0 && i > 0 {
-                if CFAbsoluteTimeGetCurrent() - startTime > 10 { return nil }
+        // Each worker strides by `workers`, so together they cover [0, maxId).
+        DispatchQueue.concurrentPerform(iterations: workers) { worker in
+            var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+            var i = worker
+            var sinceCheck = 0
+            var lastReport = startTime
+            while i < maxId {
+                // Periodically check for stop / timeout (and report progress from worker 0).
+                if sinceCheck >= 1_000_000 {
+                    sinceCheck = 0
+                    if state.isStopped() { return }
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if now - startTime > budget {
+                        state.stop()
+                        return
+                    }
+                    if worker == 0 && now - lastReport >= 2 {
+                        lastReport = now
+                        let msg = "kakaocli: recovering user ID… \(i / 1_000_000)M checked (\(Int(now - startTime))s)\n"
+                        FileHandle.standardError.write(Data(msg.utf8))
+                    }
+                }
+                let data = Array(String(i).utf8)
+                CC_SHA512(data, CC_LONG(data.count), &hash)
+                if hash == target {
+                    state.record(i)
+                    return
+                }
+                i += workers
+                sinceCheck += 1
             }
         }
-        return nil
+        return state.result()
+    }
+
+    /// Lock-guarded shared state for the parallel brute-force search.
+    private final class BruteForceState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var found: Int?
+        private var stopped = false
+
+        func isStopped() -> Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+        func stop() { lock.lock(); stopped = true; lock.unlock() }
+        func record(_ id: Int) { lock.lock(); found = id; stopped = true; lock.unlock() }
+        func result() -> Int? { lock.lock(); defer { lock.unlock() }; return found }
     }
 
     private static func longestCommonSuffix(_ strings: [String]) -> String? {

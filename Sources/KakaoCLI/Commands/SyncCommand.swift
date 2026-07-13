@@ -128,6 +128,7 @@ func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String,
         let reader = DatabaseReader(databasePath: discoveredPath)
         if reader.tryOpen(key: candidateKey) {
             reader.close()
+            DeviceInfo.cacheUserId(uid)
             return (discoveredPath, candidateKey)
         }
     }

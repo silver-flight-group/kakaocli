@@ -95,6 +95,7 @@ struct AuthCommand: ParsableCommand {
                     let reader = DatabaseReader(databasePath: discoveredDb)
                     if reader.tryOpen(key: candidateKey) {
                         print("  userId=\(candidate): OK")
+                        DeviceInfo.cacheUserId(candidate)
                         let tables = try reader.schema()
                         print("\nDatabase opened successfully with userId=\(candidate)!")
                         print("Tables found: \(tables.count)")

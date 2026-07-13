@@ -22,7 +22,7 @@ No external dependencies besides `sqlcipher` (Homebrew). The `CSQLCipher` system
 - **SQLCipher**: `PRAGMA cipher_default_compatibility = 3` (NOT `cipher_compatibility`)
 - **Container path**: `com.kakao.KakaoTalkMac` (NOT `KakaoTalk`)
 - **DB files**: No `.db` extension - raw hex filenames
-- **User ID**: Extracted from `FSChatWindowTransparency` plist key common suffix
+- **User ID** (`DeviceInfo.userId()`): resolves in order — (1) `KAKAOCLI_USER_ID` env override, (2) validated cache at `~/.kakaocli/userid.json`, (3) plist detection. Detection tries `FSChatWindowTransparency` suffix → direct keys → **SHA-512 pre-image of `DESIGNATEDFRIENDSREVISION:<hash>`** → `FSChatWindowFrame_` suffix. Newer KakaoTalk only exposes the SHA-512 hash, so the userId is brute-forced (parallelized across cores, ~40s for IDs in the hundreds of millions) then cached so it runs once. Tune the search budget with `KAKAOCLI_USERID_TIMEOUT` (seconds, default 180). The cache is revalidated against the active account hash each run, so account switches self-heal.
 - **sqlcipher header**: `#include <sqlite3.h>` (NOT `<sqlcipher/sqlite3.h>`)
 
 ### UI Automation (AX)

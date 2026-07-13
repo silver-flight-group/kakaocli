@@ -109,6 +109,7 @@ func openDatabase(dbPath: String?, key: String?, userId userIdOverride: Int? = n
                 let reader = DatabaseReader(databasePath: discoveredPath)
                 if reader.tryOpen(key: candidateKey) {
                     reader.close()
+                    DeviceInfo.cacheUserId(uid)
                     foundKey = candidateKey
                     break
                 }
