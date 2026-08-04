@@ -9,11 +9,13 @@ public struct Chat: Sendable {
     public let lastMessageId: Int64?
     public let lastMessageAt: Date?
     public let unreadCount: Int
+    public let isSelfChat: Bool
 
     public enum ChatType: String, Sendable {
         case direct = "direct"
         case group = "group"
         case openChat = "open"
+        case selfChat = "self"
         case unknown = "unknown"
     }
 }

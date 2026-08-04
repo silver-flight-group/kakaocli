@@ -109,11 +109,12 @@ kakaocli search "점심"
 # Read recent messages from a chat (substring match on name)
 kakaocli messages --chat "지수" --since 7d
 
-# Send a message (opens KakaoTalk UI automatically)
-kakaocli send "지수" "안녕!"
+# Discover the stable chat ID, then send exact stdin with an idempotency UUID
+kakaocli chats --json
+printf '%s' '안녕!' | kakaocli send --chat-id 123456 --request-id "$(uuidgen)" --json
 
-# Send to self-chat (나와의 채팅) — safe for testing
-kakaocli send --me _ "test message"
+# Self-chat is the only safe live-test destination
+printf '%s' 'test message' | kakaocli send --self --request-id "$(uuidgen)" --json
 
 # Stream new messages as JSON
 kakaocli sync --follow
@@ -123,7 +124,10 @@ kakaocli query "SELECT COUNT(*) FROM NTChatMessage"
 ```
 
 > [!TIP]
-> Use `--me` to send to your self-chat (나와의 채팅) when testing. This is the safest way to verify send functionality.
+> Sending accepts only an exact numeric chat ID or `--self`. A result is
+> `confirmed` only when the exact outgoing bytes appear under that chat ID in
+> the local database. Repeating the exact same request ID only reconciles the
+> database and never repeats the UI action. Never retry `unknown` with a new ID.
 
 ## Commands
 
@@ -146,10 +150,21 @@ All read commands support `--json` for structured output.
 ### Send / 전송
 
 ```bash
-kakaocli send "chat name" "message"    # Send to a chat
-kakaocli send --me _ "message"         # Send to self-chat (나와의 채팅)
-kakaocli send --dry-run "name" "msg"   # Preview without sending
+printf '%s' 'message' | kakaocli send --chat-id 123456 --request-id UUID
+printf '%s' 'message' | kakaocli send --self --request-id UUID
+printf '%s' 'message' | kakaocli send --self --request-id UUID --dry-run
 ```
+
+`send` never launches or activates KakaoTalk, raises a window, moves the cursor,
+or posts global input. KakaoTalk must already be running with its main window
+rendered. The command resolves the ID through the local database, requires one
+database-unique UI identity and one exact row in the structurally verified,
+selected Chats tab, rejects every already-open room and all drafts, verifies
+selection/focus/window title/composer/control identity immediately before the
+action, and uses one exact Send control or a focused-composer Return event
+delivered only to KakaoTalk's process. A same-process mutex and cross-process
+lock cover the whole resolution, UI, and exact database-confirmation
+transaction. Bodies are capped at 64 KiB of UTF-8.
 
 ### Sync / 동기화
 
@@ -187,11 +202,15 @@ kakaocli login --status                               # Check status
 kakaocli login --clear                                # Remove credentials
 ```
 
-When you run `send`, `sync`, or any command that needs KakaoTalk, the tool automatically launches the app, detects the login screen, fills credentials, and waits for login to complete.
+The `login` command can manage stored credentials. `send` deliberately does
+not enter the app lifecycle path and fails closed when the rendered main window
+is unavailable; the user may foreground KakaoTalk manually.
 
 ## AI Integration / AI 연동
 
-kakaocli is designed to work with AI coding assistants and agents. Every read command outputs structured JSON, and the tool handles KakaoTalk's full lifecycle automatically (launch, login, window management).
+kakaocli is designed to work with AI coding assistants and agents. Every read
+command outputs structured JSON. Sending deliberately does not enter the app
+lifecycle path.
 
 ### Claude Code
 
@@ -204,8 +223,8 @@ Use `kakaocli` to read and send KakaoTalk messages:
 - `kakaocli chats --json` — list all chats
 - `kakaocli messages --chat "name" --json` — read messages
 - `kakaocli search "keyword" --json` — search messages
-- `kakaocli send "name" "message"` — send a message
-- `kakaocli send --me _ "message"` — send to self-chat (safe for testing)
+- `printf message | kakaocli send --chat-id ID --request-id UUID` — send to an exact ID
+- `printf message | kakaocli send --self --request-id UUID` — self-chat test
 ```
 
 Or copy the skill file directly:
@@ -225,8 +244,8 @@ Add to your project rules or `.cursorrules`:
 You have access to kakaocli for KakaoTalk messaging.
 Run `kakaocli chats --json` to list chats.
 Run `kakaocli messages --chat "name" --since 1d --json` to read messages.
-Run `kakaocli send "name" "message"` to send messages.
-Always use --me flag when testing: `kakaocli send --me _ "test"`.
+Pipe approved text to `kakaocli send --chat-id ID --request-id UUID`.
+Always use `--self` for live tests and never retry an `unknown` result.
 Always ask for confirmation before sending messages to other people.
 ```
 
@@ -267,7 +286,7 @@ kakaocli는 카카오톡의 로컬 SQLCipher 암호화 데이터베이스를 **�
 
 - **Incomplete message history.** KakaoTalk Mac only syncs messages from the server when you open a chat. If you haven't opened a chat on your Mac in a while (or ever), older messages won't be in the local database. Use `kakaocli harvest --scroll` to trigger loading older history, but this is limited by KakaoTalk's own sync behavior and the Talk Drive Plus paywall.
 - **Group chat names may show as `(unknown)`.** The database doesn't always store display names for group chats. Run `kakaocli harvest` to capture names from the UI.
-- **Sending requires KakaoTalk to be running.** Read commands work without the app open, but `send`, `sync`, and `harvest` need the KakaoTalk window. kakaocli launches and logs in automatically if credentials are stored.
+- **Sending requires a rendered KakaoTalk main window.** `send` never launches or activates KakaoTalk and fails closed if the app or main window is unavailable. The user may foreground it manually. Read commands work from the local database; `harvest` still uses its separate foreground UI workflow.
 - **One Mac at a time.** KakaoTalk only allows one Mac logged in per account.
 - **Media and non-text messages.** Currently only text messages are fully supported. Photos, videos, stickers, and other media types are visible in the database but not rendered.
 
@@ -276,7 +295,7 @@ kakaocli는 카카오톡의 로컬 SQLCipher 암호화 데이터베이스를 **�
 
 - **불완전한 메시지 기록.** 카카오톡 Mac은 채팅을 열어야 서버에서 메시지를 동기화합니다. Mac에서 오래 열지 않은 채팅은 이전 메시지가 로컬 데이터베이스에 없을 수 있습니다. `kakaocli harvest --scroll`로 이전 메시지 로드를 시도할 수 있지만, 카카오톡 자체 동기화 및 톡드라이브 플러스 페이월에 의해 제한됩니다.
 - **그룹 채팅 이름이 `(unknown)`으로 표시될 수 있습니다.** `kakaocli harvest`를 실행하여 UI에서 이름을 수집하세요.
-- **전송 시 카카오톡 실행 필요.** 읽기 명령은 앱 없이 작동하지만, `send`, `sync`, `harvest`는 카카오톡 창이 필요합니다.
+- **전송 시 카카오톡 메인 창 필요.** `send`는 카카오톡을 실행하거나 활성화하지 않으며 앱이나 메인 창을 사용할 수 없으면 실패합니다. 사용자가 직접 카카오톡을 전면에 표시할 수 있습니다. `harvest`의 별도 UI 흐름은 계속 포그라운드 권한이 필요합니다.
 - **계정당 Mac 1대.** 카카오톡은 계정당 하나의 Mac만 로그인을 허용합니다.
 - **미디어 및 비텍스트 메시지.** 현재 텍스트 메시지만 완전히 지원됩니다.
 

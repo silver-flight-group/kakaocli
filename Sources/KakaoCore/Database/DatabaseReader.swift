@@ -85,20 +85,58 @@ public final class DatabaseReader: @unchecked Sendable {
 
     /// List all chat rooms.
     public func chats(limit: Int = 50) throws -> [Chat] {
+        try loadChats(chatId: nil, selfOnly: false, limit: max(1, limit))
+    }
+
+    /// Resolve send identities with fresh source-database queries. The UI has
+    /// only a display label, so the caller separately requires that label to
+    /// map to exactly one current database chat.
+    public func chat(id: Int64) throws -> Chat? {
+        try loadChats(chatId: id, selfOnly: false, limit: nil).first
+    }
+
+    public func selfChat() throws -> Chat? {
+        let matches = try loadChats(chatId: nil, selfOnly: true, limit: nil)
+        guard matches.count <= 1 else {
+            throw KakaoError.databaseOpenFailed("The self-chat identity is ambiguous")
+        }
+        return matches.first
+    }
+
+    public func chatUIIdentityCount(displayName: String) throws -> Int {
+        try loadChats(chatId: nil, selfOnly: false, limit: nil)
+            .count { $0.displayName == displayName }
+    }
+
+    private func loadChats(chatId: Int64?, selfOnly: Bool, limit: Int?) throws -> [Chat] {
+        let selfDisplayName = try currentUserDisplayName()
+        var conditions: [String] = []
+        var bindings: [SQLValue] = []
+        if let chatId {
+            conditions.append("r.chatId = ?")
+            bindings.append(.int64(chatId))
+        }
+        if selfOnly { conditions.append("r.type = 5") }
+        let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+        let limitClause = limit == nil ? "" : "LIMIT ?"
         let sql = """
             SELECT r.chatId, r.type, r.chatName, r.activeMembersCount,
                    r.lastLogId, r.lastUpdatedAt, r.countOfNewMessage,
                    u.displayName, u.friendNickName, u.nickName
             FROM NTChatRoom r
             LEFT JOIN NTUser u ON r.directChatMemberUserId = u.userId AND u.linkId = 0
+            \(whereClause)
             ORDER BY r.lastUpdatedAt DESC
-            LIMIT ?
+            \(limitClause)
             """
-        return try query(sql, bind: [.int(limit)]) { row in
+        if let limit { bindings.append(.int(max(1, limit))) }
+        return try query(sql, bind: bindings) { row in
             // For direct chats, use the friend's name; for groups, use chatName
             let chatName = row.string(2)
-            let displayName = row.string(7) ?? row.string(8) ?? row.string(9)
-            let name = chatName ?? displayName ?? "(unknown)"
+            // Kakao's chat list prefers the locally assigned friend nickname.
+            let displayName = row.string(8) ?? row.string(7) ?? row.string(9)
+            let isSelf = row.int(1) == 5
+            let name = isSelf ? (selfDisplayName ?? "(unknown)") : (chatName ?? displayName ?? "(unknown)")
 
             return Chat(
                 id: row.int64(0),
@@ -107,7 +145,8 @@ public final class DatabaseReader: @unchecked Sendable {
                 memberCount: row.int(3),
                 lastMessageId: row.optionalInt64(4),
                 lastMessageAt: row.optionalKakaoDate(5),
-                unreadCount: row.int(6)
+                unreadCount: row.int(6),
+                isSelfChat: isSelf
             )
         }
     }
@@ -185,10 +224,29 @@ public final class DatabaseReader: @unchecked Sendable {
 
     /// Get the logged-in user's ID from NTChatContext.
     public func myUserId() throws -> Int64 {
-        let results = try query("SELECT userId FROM NTChatContext LIMIT 1", bind: []) { row in
+        let results = try query("SELECT userId FROM NTChatContext LIMIT 2", bind: []) { row in
             row.int64(0)
         }
-        return results.first ?? 0
+        guard results.count == 1, let value = results.first, value > 0 else {
+            throw KakaoError.databaseOpenFailed("The current KakaoTalk user identity is ambiguous")
+        }
+        return value
+    }
+
+    private func currentUserDisplayName() throws -> String? {
+        let values: [String?] = try query(
+            """
+            SELECT COALESCE(NULLIF(u.displayName, ''), NULLIF(u.nickName, ''), NULLIF(u.friendNickName, ''))
+            FROM NTChatContext c
+            JOIN NTUser u ON u.userId = c.userId AND u.linkId = 0
+            LIMIT 2
+            """,
+            bind: []
+        ) { $0.string(0) }
+        guard values.count <= 1 else {
+            throw KakaoError.databaseOpenFailed("The current KakaoTalk user identity is ambiguous")
+        }
+        return values.first.flatMap { $0 }
     }
 
     /// Get the maximum logId in the messages table (used by DatabaseWatcher).
@@ -197,6 +255,27 @@ public final class DatabaseReader: @unchecked Sendable {
             row.optionalInt64(0)
         }
         return results.first.flatMap { $0 } ?? 0
+    }
+
+    public func maxLogId(chatId: Int64) throws -> Int64 {
+        let results = try query(
+            "SELECT MAX(logId) FROM NTChatMessage WHERE chatId = ?",
+            bind: [.int64(chatId)]
+        ) { $0.optionalInt64(0) }
+        return results.first.flatMap { $0 } ?? 0
+    }
+
+    public func confirmedOutgoing(chatId: Int64, body: Data, after logId: Int64) throws -> Int64? {
+        let sql = """
+            SELECT logId FROM NTChatMessage
+            WHERE chatId = ? AND logId > ? AND authorId = ?
+              AND CAST(message AS BLOB) = ?
+            ORDER BY logId ASC LIMIT 1
+            """
+        return try query(
+            sql,
+            bind: [.int64(chatId), .int64(logId), .int64(try myUserId()), .blob(body)]
+        ) { $0.int64(0) }.first
     }
 
     /// Get messages with logId strictly greater than the given value.
@@ -282,6 +361,7 @@ public final class DatabaseReader: @unchecked Sendable {
         case int64(Int64)
         case double(Double)
         case string(String)
+        case blob(Data)
         case null
     }
 
@@ -310,6 +390,13 @@ public final class DatabaseReader: @unchecked Sendable {
             case .int64(let v): sqlite3_bind_int64(stmt, idx, v)
             case .double(let v): sqlite3_bind_double(stmt, idx, v)
             case .string(let v): sqlite3_bind_text(stmt, idx, v, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            case .blob(let data):
+                _ = data.withUnsafeBytes { bytes in
+                    sqlite3_bind_blob(
+                        stmt, idx, bytes.baseAddress, Int32(data.count),
+                        unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                    )
+                }
             case .null: sqlite3_bind_null(stmt, idx)
             }
         }
@@ -365,6 +452,7 @@ extension Chat.ChatType {
         switch rawInt {
         case 0: return .direct
         case 1: return .group
+        case 5: return .selfChat
         default: return .unknown
         }
     }
