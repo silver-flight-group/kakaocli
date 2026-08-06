@@ -213,10 +213,11 @@ public enum AXHelpers {
 
     /// Find the AXRow in a chat list whose name label matches the given text.
     ///
-    /// Note this only sees rows in the top-level chat list. Chats the user has
-    /// filed under "Silent Chatroom" live in a collapsed folder row and are not
-    /// children of this table, so they cannot be found here — see
-    /// `chatRowName` for the label lookup itself.
+    /// Note this only sees rows in the **top-level** chat list. KakaoTalk groups
+    /// chats into folders — the `NTChatFolder` table, plus "Silent Chatroom" —
+    /// and a folder appears as a single collapsed row whose members are not
+    /// children of this table. They therefore cannot be found here at all. On my
+    /// install that hides 17 of 59 chats, so `send` fails for any of them.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
         for row in children(table) {
             guard role(row) == "AXRow", let name = chatRowName(row) else { continue }
