@@ -186,23 +186,42 @@ public enum AXHelpers {
         return nil
     }
 
+    /// The chat name shown on a chat-list row, or nil if the row has no label.
+    ///
+    /// This used to key off the AXIdentifier `_NS:18`. Those identifiers are
+    /// AppKit internals (`_NS:` + a nib-encoding ordinal) and are **not stable
+    /// across KakaoTalk builds**: on current versions the name label is
+    /// `_NS:40`, and `_NS:18` is the "badge openchat room" *AXImage*. Since the
+    /// old lookup also required role `AXStaticText`, it matched nothing at all —
+    /// silently, so `findChatRow` returned nil for every chat and `harvest`
+    /// recorded every name as "(unknown)".
+    ///
+    /// Match on structure instead, which has been stable: inside the row's
+    /// AXCell the name is the first AXStaticText. The optional openchat badge
+    /// ahead of it is an AXImage, and the unread "Count Label" and the timestamp
+    /// both come after it.
+    public static func chatRowName(_ row: AXUIElement) -> String? {
+        for cell in children(row) {
+            guard role(cell) == "AXCell" else { continue }
+            for child in children(cell) {
+                guard role(child) == "AXStaticText" else { continue }
+                if let name = value(child), !name.isEmpty { return name }
+            }
+        }
+        return nil
+    }
+
     /// Find the AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
+    ///
+    /// Note this only sees rows in the top-level chat list. Chats the user has
+    /// filed under "Silent Chatroom" live in a collapsed folder row and are not
+    /// children of this table, so they cannot be found here — see
+    /// `chatRowName` for the label lookup itself.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
         for row in children(table) {
-            guard role(row) == "AXRow" else { continue }
-            for cell in children(row) {
-                guard role(cell) == "AXCell" else { continue }
-                for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
-                        let name = value(child) ?? ""
-                        let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
-                        if matches {
-                            return row
-                        }
-                    }
-                }
-            }
+            guard role(row) == "AXRow", let name = chatRowName(row) else { continue }
+            let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
+            if matches { return row }
         }
         return nil
     }
