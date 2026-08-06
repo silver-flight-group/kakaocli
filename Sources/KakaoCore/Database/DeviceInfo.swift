@@ -126,26 +126,24 @@ public enum DeviceInfo {
         return []
     }
 
-    /// Discover database file by scanning the container for 78-char hex filenames.
-    public static func discoverDatabaseFile() -> String? {
+    /// Discover all candidate database files by scanning the container for 78-char hex
+    /// filenames (with or without .db extension). More than one can exist if several
+    /// KakaoTalk accounts have been logged into this Mac over time (shared machine,
+    /// employee turnover) — callers should try every entry, not just the first.
+    public static func discoverDatabaseFiles() -> [String] {
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(atPath: containerPath) else { return nil }
-        let hexPattern = try! NSRegularExpression(pattern: "^[0-9a-f]{78}$")
-        for entry in entries {
+        guard let entries = try? fm.contentsOfDirectory(atPath: containerPath) else { return [] }
+        let hexPattern = try! NSRegularExpression(pattern: "^[0-9a-f]{78}(\\.db)?$")
+        return entries.filter { entry in
             let range = NSRange(entry.startIndex..., in: entry)
-            if hexPattern.firstMatch(in: entry, range: range) != nil {
-                return "\(containerPath)/\(entry)"
-            }
-        }
-        // Also check files with .db extension that have hex basename
-        let hexDbPattern = try! NSRegularExpression(pattern: "^[0-9a-f]{78}\\.db$")
-        for entry in entries {
-            let range = NSRange(entry.startIndex..., in: entry)
-            if hexDbPattern.firstMatch(in: entry, range: range) != nil {
-                return "\(containerPath)/\(entry)"
-            }
-        }
-        return nil
+            return hexPattern.firstMatch(in: entry, range: range) != nil
+        }.map { "\(containerPath)/\($0)" }
+    }
+
+    /// Discover a single database file (first match). Kept for callers that only need one;
+    /// prefer `discoverDatabaseFiles()` when multiple accounts may have used this Mac.
+    public static func discoverDatabaseFile() -> String? {
+        discoverDatabaseFiles().first
     }
 
     /// Count database files in the container (78-char hex files or .db files).
