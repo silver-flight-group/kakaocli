@@ -55,14 +55,16 @@ struct AuthCommand: ParsableCommand {
             print("Secure key: \(secureKey.prefix(16))...")
         }
 
-        // 4. Discover database file
-        let discoveredDb = DeviceInfo.discoverDatabaseFile()
-        if let discoveredDb {
-            let name = (discoveredDb as NSString).lastPathComponent
-            print("Discovered DB: \(name)")
+        // 4. Discover database file(s) — more than one can exist if several KakaoTalk
+        // accounts have used this Mac over time (shared machine, employee turnover).
+        let discoveredDbs = DeviceInfo.discoverDatabaseFiles()
+        for db in discoveredDbs {
+            print("Discovered DB: \((db as NSString).lastPathComponent)")
         }
 
-        // 5. Try to find working userId + key combination
+        // 5. Try the standard derived path first, but only trust it if it actually opens —
+        // a file existing at the derived name doesn't prove the derived key is right (stale
+        // plist state from a previous account on this Mac can point at someone else's DB).
         if let uid {
             let dbName = KeyDerivation.databaseName(userId: uid, uuid: deviceUUID)
             let candidates = [
@@ -70,50 +72,57 @@ struct AuthCommand: ParsableCommand {
                 "\(DeviceInfo.containerPath)/\(dbName).db",
             ]
             if let dbPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-                print("Database found: \(dbPath)")
                 let secureKey = KeyDerivation.secureKey(userId: uid, uuid: deviceUUID)
-                try verifyDatabase(path: dbPath, key: secureKey)
-                return
+                let reader = DatabaseReader(databasePath: dbPath)
+                if reader.tryOpen(key: secureKey) {
+                    print("Database found: \(dbPath)")
+                    let tables = try reader.schema()
+                    print("\nDatabase opened successfully!")
+                    print("Tables found: \(tables.count)")
+                    for table in tables {
+                        print("  - \(table.name)")
+                    }
+                    reader.close()
+                    return
+                }
+                if verbose {
+                    print("Derived DB name matched \(dbPath) but the derived key could not open it — trying other candidates")
+                }
             } else if verbose {
                 print("Derived DB name does not match any file")
             }
         }
 
-        // 6. Try discovered DB with candidate userIds
-        if let discoveredDb {
-            let candidateIds: [Int]
-            if let uid {
-                candidateIds = [uid] + DeviceInfo.candidateUserIds().filter { $0 != uid }
-            } else {
-                candidateIds = DeviceInfo.candidateUserIds()
-            }
+        // 6. Try every discovered DB against every candidate userId's key.
+        if !discoveredDbs.isEmpty {
+            var candidateIds = uid.map { [$0] } ?? [Int]()
+            candidateIds += DeviceInfo.candidateUserIds().filter { !candidateIds.contains($0) }
 
             if !candidateIds.isEmpty {
-                print("\nTrying candidate user IDs against discovered DB...")
-                for candidate in candidateIds {
-                    let candidateKey = KeyDerivation.secureKey(userId: candidate, uuid: deviceUUID)
-                    let reader = DatabaseReader(databasePath: discoveredDb)
-                    if reader.tryOpen(key: candidateKey) {
-                        print("  userId=\(candidate): OK")
-                        let tables = try reader.schema()
-                        print("\nDatabase opened successfully with userId=\(candidate)!")
-                        print("Tables found: \(tables.count)")
-                        for table in tables {
-                            print("  - \(table.name)")
-                        }
-                        reader.close()
-                        return
-                    } else {
-                        if verbose {
-                            print("  userId=\(candidate): key mismatch")
+                print("\nTrying candidate user IDs against discovered DB(s)...")
+                for db in discoveredDbs {
+                    for candidate in candidateIds {
+                        let candidateKey = KeyDerivation.secureKey(userId: candidate, uuid: deviceUUID)
+                        let reader = DatabaseReader(databasePath: db)
+                        if reader.tryOpen(key: candidateKey) {
+                            print("  \((db as NSString).lastPathComponent) userId=\(candidate): OK")
+                            let tables = try reader.schema()
+                            print("\nDatabase opened successfully with userId=\(candidate)!")
+                            print("Tables found: \(tables.count)")
+                            for table in tables {
+                                print("  - \(table.name)")
+                            }
+                            reader.close()
+                            return
+                        } else if verbose {
+                            print("  \((db as NSString).lastPathComponent) userId=\(candidate): key mismatch")
                         }
                     }
                 }
             }
 
-            // None of the candidate keys worked
-            print("\nNo candidate user ID produced a valid key.")
-            print("The database file exists but could not be decrypted.")
+            // None of the candidate keys worked against any discovered DB
+            print("\nNo candidate user ID produced a valid key for any discovered database.")
             print("\nTo provide your user ID manually:")
             print("  kakaocli auth --user-id <YOUR_KAKAO_USER_ID>")
             print("\nTo find your user ID, check your KakaoTalk mobile app settings")
@@ -133,22 +142,5 @@ struct AuthCommand: ParsableCommand {
             print("  Could not list directory (check Full Disk Access)")
         }
         throw ExitCode.failure
-    }
-
-    private func verifyDatabase(path: String, key: String) throws {
-        let reader = DatabaseReader(databasePath: path)
-        do {
-            try reader.open(key: key)
-            let tables = try reader.schema()
-            print("\nDatabase opened successfully!")
-            print("Tables found: \(tables.count)")
-            for table in tables {
-                print("  - \(table.name)")
-            }
-        } catch {
-            print("\nFailed to open database: \(error)")
-            print("This may mean the key is wrong or SQLCipher is needed.")
-            print("Install SQLCipher: brew install sqlcipher")
-        }
     }
 }

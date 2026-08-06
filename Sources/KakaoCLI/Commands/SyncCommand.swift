@@ -96,42 +96,57 @@ func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String,
     }
     let uuid = try DeviceInfo.platformUUID()
 
-    // Try standard path: derive userId → derive dbName → find file
-    if let uid = try? DeviceInfo.userId() {
+    // Try standard path: derive userId → derive dbName → find file → verify it actually opens.
+    // A file existing at the derived name is not proof the derived key is right — if this Mac
+    // has been used by more than one employee/KakaoTalk account, stale plist state can make
+    // userId() resolve to a *previous* account whose leftover encrypted DB still happens to be
+    // on disk. Opening it is the only real check; if it fails we must not trust this branch.
+    if key == nil, let uid = try? DeviceInfo.userId() {
         let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
         let candidates = [
             "\(DeviceInfo.containerPath)/\(dbName)",
             "\(DeviceInfo.containerPath)/\(dbName).db",
         ]
         if let found = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-            let secureKey = key ?? KeyDerivation.secureKey(userId: uid, uuid: uuid)
-            return (found, secureKey)
+            let secureKey = KeyDerivation.secureKey(userId: uid, uuid: uuid)
+            let reader = DatabaseReader(databasePath: found)
+            if reader.tryOpen(key: secureKey) {
+                reader.close()
+                return (found, secureKey)
+            }
+            // Derived key didn't actually open the file — fall through to the
+            // discover+candidate search below instead of returning a wrong key.
         }
     }
 
-    // Fallback: scan for DB file, try candidate userIds for the key
-    guard let discoveredPath = DeviceInfo.discoverDatabaseFile() else {
+    // Fallback: scan for every DB file this container holds (there can be more than one — see
+    // above) and try every candidate userId's key against each until one actually opens.
+    let discoveredPaths = DeviceInfo.discoverDatabaseFiles()
+    guard !discoveredPaths.isEmpty else {
         let uid = try DeviceInfo.userId()
         let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
         throw KakaoError.databaseNotFound("\(DeviceInfo.containerPath)/\(dbName)")
     }
 
     if let key {
-        return (discoveredPath, key)
+        return (discoveredPaths[0], key)
     }
 
-    // Try candidate userIds to find a working key
     var candidateIds = (try? DeviceInfo.userId()).map { [$0] } ?? [Int]()
     candidateIds += DeviceInfo.candidateUserIds().filter { !candidateIds.contains($0) }
-    for uid in candidateIds {
-        let candidateKey = KeyDerivation.secureKey(userId: uid, uuid: uuid)
-        let reader = DatabaseReader(databasePath: discoveredPath)
-        if reader.tryOpen(key: candidateKey) {
-            reader.close()
-            return (discoveredPath, candidateKey)
+
+    for path in discoveredPaths {
+        for uid in candidateIds {
+            let candidateKey = KeyDerivation.secureKey(userId: uid, uuid: uuid)
+            let reader = DatabaseReader(databasePath: path)
+            if reader.tryOpen(key: candidateKey) {
+                reader.close()
+                return (path, candidateKey)
+            }
         }
     }
 
-    // Return the discovered path without a key — caller will get a decryption error
-    return (discoveredPath, nil)
+    // Nothing opened — return the first discovered path without a key so the caller
+    // still gets a clear decryption error instead of a silent wrong-key failure.
+    return (discoveredPaths[0], nil)
 }
