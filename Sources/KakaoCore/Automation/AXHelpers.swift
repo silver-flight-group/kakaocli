@@ -217,7 +217,10 @@ public enum AXHelpers {
     /// chats into folders — the `NTChatFolder` table, plus "Silent Chatroom" —
     /// and a folder appears as a single collapsed row whose members are not
     /// children of this table. They therefore cannot be found here at all. On my
-    /// install that hides 17 of 59 chats, so `send` fails for any of them.
+    /// install "Silent Chatroom" alone holds 16 of 59 chats, so `send` fails for
+    /// every one of them. Note membership is not visible in the database: only
+    /// 14 of those 16 are muted (`NTChatRoom.pushAlert = 0`), so a chat can be
+    /// filed there — and made unreachable — with no column recording it.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
         for row in children(table) {
             guard role(row) == "AXRow", let name = chatRowName(row) else { continue }
