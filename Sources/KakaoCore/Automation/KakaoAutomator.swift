@@ -53,6 +53,18 @@ public final class KakaoAutomator {
             row = selfRow
         } else {
             guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName) else {
+                // Consult the harvest record *after* the lookup fails, never
+                // before. Checking first would let stale metadata block a send
+                // that would have worked — the user can move a chat out of a
+                // folder at any time, and nothing notifies us. Used this way it
+                // only ever explains a failure that already happened.
+                let metadata = MetadataStore()
+                if let hit = metadata.unreachableChats.first(where: {
+                    $0.name.localizedCaseInsensitiveContains(chatName)
+                        || chatName.localizedCaseInsensitiveContains($0.name)
+                }) {
+                    throw AutomationError.chatInFolder(hit.name)
+                }
                 throw AutomationError.chatNotFound(chatName)
             }
             row = chatRow
@@ -164,6 +176,7 @@ public enum AutomationError: Error, CustomStringConvertible {
     case inputFieldNotFound
     case sendFailed(String)
     case wrongChatOpened(asked: String, opened: String)
+    case chatInFolder(String)
 
     public var description: String {
         switch self {
@@ -175,6 +188,13 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "Could not find the message input field"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
+        case .chatInFolder(let name):
+            return """
+                Chat '\(name)' is inside a KakaoTalk folder (e.g. Silent Chatroom), \
+                so it has no row in the top-level chat list and cannot be opened by \
+                automation. Move it out of the folder in KakaoTalk to send to it. \
+                Reading and syncing this chat are unaffected.
+                """
         case .wrongChatOpened(let asked, let opened):
             return """
                 Refusing to send: asked for chat '\(asked)' but '\(opened)' opened. \

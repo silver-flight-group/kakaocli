@@ -72,6 +72,15 @@ public enum ChatHarvester {
             ORDER BY r.lastUpdatedAt DESC
         """)
 
+        // Names via DatabaseReader.chats(), which resolves open-chat link names,
+        // room titles and group member joins. The rawQuery above only knows
+        // chatName and the direct partner, and pairing on those under-matches:
+        // an open chat would fail pass 1, fall through preview matching, and be
+        // recorded as "not in the top-level list" while plainly sitting in it.
+        // For a reachability check that false negative is the harmful direction.
+        let properNames = try db.chats(limit: 10_000)
+            .reduce(into: [Int64: String]()) { $0[$1.id] = $1.displayName }
+
         progress("Found \(dbChats.count) chats in database")
 
         // 2. Ensure KakaoTalk is running, logged in, *and showing its window*.
@@ -125,7 +134,30 @@ public enum ChatHarvester {
         //    join key. A row that matches nothing is skipped and reported: the
         //    cost of a miss is a chat that keeps its existing name, while the
         //    cost of a bad guess is a *wrong* name written onto a real chat id.
-        let pairs = pairRows(allRows, with: dbChats, progress: progress)
+        let pairs = pairRows(allRows, with: dbChats, names: properNames, progress: progress)
+
+        // 7b. Record top-level-list membership for EVERY chat, not just the ones
+        //     we paired. A chat's *absence* from the visible list is the whole
+        //     signal: it means the chat sits inside a folder ("Silent Chatroom"),
+        //     where findChatRow cannot reach it and `send` will fail. Nothing on
+        //     this machine records that grouping — no NTChatRoom column, no
+        //     NTChatFolder row, no NTSetting key, no container plist, and
+        //     pushAlert = 0 catches only the muted subset — so comparing the
+        //     database against the visible list is the only way to know, and a
+        //     harvest is already standing in exactly the right place to do it.
+        let seen = Set(pairs.compactMap { $0.1[0] as? Int64 })
+        var unreachable = 0
+        for chat in dbChats {
+            // chatId -1 is a sentinel, not a chat, and is never in the list.
+            guard let id = chat[0] as? Int64, id != -1 else { continue }
+            let present = seen.contains(id)
+            if !present { unreachable += 1 }
+            metadata.setInTopLevelList(chatId: id, present, name: properNames[id])
+        }
+        if unreachable > 0 {
+            progress("\(unreachable) chats are not in the top-level list — inside a folder, unreachable by `send`")
+        }
+
         let limit = options.maxChats > 0 ? min(options.maxChats, pairs.count) : pairs.count
 
         var results: [HarvestResult] = []
@@ -263,11 +295,13 @@ public enum ChatHarvester {
     private static func pairRows(
         _ rows: [AXUIElement],
         with dbChats: [[Any]],
+        names: [Int64: String],
         progress: (String) -> Void
     ) -> [(AXUIElement, [Any], String)] {
         var byName: [String: [Any]] = [:]
         for chat in dbChats {
-            guard let name = chat[6] as? String, !name.isEmpty else { continue }
+            guard let id = chat[0] as? Int64, let name = names[id], !name.isEmpty,
+                  name != "(unknown)" else { continue }
             // Ambiguous titles can't identify a chat; drop both.
             if byName[name] != nil { byName[name] = nil } else { byName[name] = chat }
         }
