@@ -89,6 +89,27 @@ public final class KakaoAutomator {
             throw AutomationError.inputFieldNotFound
         }
 
+        // 7b. Confirm we opened the chat we were asked for, before typing.
+        //
+        // findChatRow returns an AXUIElement whose activation is positional —
+        // scrollRowToVisible + doubleClickElement click at the row's screen
+        // coordinates. The chat list re-sorts every time a message arrives, so
+        // between matching the row and clicking it, a different chat can slide
+        // under those coordinates and open instead. Nothing downstream noticed:
+        // step 7 accepts *any* non-main window and step 9 types into it and
+        // presses Return.
+        //
+        // Delivering a message to the wrong person cannot be undone, so this is
+        // checked rather than assumed. The window title is the chat name.
+        let openedTitle = (AXHelpers.title(chatWindow) ?? "").trimmingCharacters(in: .whitespaces)
+        let wanted = chatName.trimmingCharacters(in: .whitespaces)
+        if !selfChat, !openedTitle.isEmpty, !wanted.isEmpty,
+           !openedTitle.localizedCaseInsensitiveContains(wanted),
+           !wanted.localizedCaseInsensitiveContains(openedTitle) {
+            _ = AXHelpers.closeWindow(chatWindow)
+            throw AutomationError.wrongChatOpened(asked: chatName, opened: openedTitle)
+        }
+
         // 8. Find the message input field
         guard let inputField = findInputField(in: chatWindow) else {
             throw AutomationError.inputFieldNotFound
@@ -142,6 +163,7 @@ public enum AutomationError: Error, CustomStringConvertible {
     case chatNotFound(String)
     case inputFieldNotFound
     case sendFailed(String)
+    case wrongChatOpened(asked: String, opened: String)
 
     public var description: String {
         switch self {
@@ -153,6 +175,12 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "Could not find the message input field"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
+        case .wrongChatOpened(let asked, let opened):
+            return """
+                Refusing to send: asked for chat '\(asked)' but '\(opened)' opened. \
+                The chat list re-sorts when messages arrive, so the click landed on \
+                a different chat. Nothing was sent — retry.
+                """
         }
     }
 }
