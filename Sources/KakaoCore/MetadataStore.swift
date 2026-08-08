@@ -30,11 +30,17 @@ public final class MetadataStore {
     private let filePath: String
     private var chats: [String: ChatInfo]
 
-    public init() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".kakaocli")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        filePath = dir.appendingPathComponent("metadata.json").path
+    /// `path` exists so tests can round-trip the store without touching the
+    /// user's real `~/.kakaocli/metadata.json`. Production callers omit it.
+    public init(path: String? = nil) {
+        if let path {
+            filePath = path
+        } else {
+            let dir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".kakaocli")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            filePath = dir.appendingPathComponent("metadata.json").path
+        }
 
         // The decoder must mirror save()'s .iso8601 date strategy. It didn't:
         // save() wrote dates as ISO8601 strings while this used JSONDecoder's
