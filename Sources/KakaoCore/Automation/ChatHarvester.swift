@@ -74,10 +74,16 @@ public enum ChatHarvester {
 
         progress("Found \(dbChats.count) chats in database")
 
-        // 2. Ensure KakaoTalk is running and logged in
+        // 2. Ensure KakaoTalk is running, logged in, *and showing its window*.
+        //    ensureReady() has to be called unconditionally. A running,
+        //    logged-in KakaoTalk whose main window has been closed still
+        //    reports .loggedIn, so the old state guard skipped the one call
+        //    that reopens it — ensureWindowVisible() — and harvest then threw
+        //    noWindows from step 3. `KakaoAutomator.sendMessage` already calls
+        //    it unconditionally for exactly this reason.
         let state = AppLifecycle.detectState()
-        if state == .notRunning || state == .loginScreen {
-            try AppLifecycle.ensureReady(credentials: CredentialStore())
+        try AppLifecycle.ensureReady(credentials: CredentialStore())
+        if state != .loggedIn {
             Thread.sleep(forTimeInterval: 2.0)
         }
 
