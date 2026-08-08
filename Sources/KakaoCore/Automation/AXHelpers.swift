@@ -171,6 +171,24 @@ public enum AXHelpers {
     }
 
     /// Find the first element matching a role and identifier.
+    /// First descendant with the given role and accessibility description.
+    /// KakaoTalk labels several chrome buttons ("Search", "Add chatroom") by
+    /// description only — they have no title and no stable identifier.
+    public static func findFirst(
+        _ element: AXUIElement, role targetRole: String, description targetDesc: String,
+        maxDepth: Int = 10, currentDepth: Int = 0
+    ) -> AXUIElement? {
+        if currentDepth > maxDepth { return nil }
+        if role(element) == targetRole, description(element) == targetDesc { return element }
+        for child in children(element) {
+            if let hit = findFirst(child, role: targetRole, description: targetDesc,
+                                   maxDepth: maxDepth, currentDepth: currentDepth + 1) {
+                return hit
+            }
+        }
+        return nil
+    }
+
     public static func findFirst(_ element: AXUIElement, role targetRole: String, identifier targetId: String, maxDepth: Int = 10, currentDepth: Int = 0) -> AXUIElement? {
         guard currentDepth <= maxDepth else { return nil }
         if role(element) == targetRole {
@@ -186,25 +204,140 @@ public enum AXHelpers {
         return nil
     }
 
-    /// Find the AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
-    public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
-        for row in children(table) {
-            guard role(row) == "AXRow" else { continue }
-            for cell in children(row) {
-                guard role(cell) == "AXCell" else { continue }
-                for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
-                        let name = value(child) ?? ""
-                        let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
-                        if matches {
-                            return row
-                        }
-                    }
-                }
+    /// The chat name shown on a chat-list row, or nil if the row has no label.
+    ///
+    /// This used to key off the AXIdentifier `_NS:18`. Those identifiers are
+    /// AppKit internals (`_NS:` + a nib-encoding ordinal) and are **not stable
+    /// across KakaoTalk builds**: on current versions the name label is
+    /// `_NS:40`, and `_NS:18` is the "badge openchat room" *AXImage*. Since the
+    /// old lookup also required role `AXStaticText`, it matched nothing at all —
+    /// silently, so `findChatRow` returned nil for every chat and `harvest`
+    /// recorded every name as "(unknown)".
+    ///
+    /// Match on structure instead, which has been stable: inside the row's
+    /// AXCell the name is the first AXStaticText. The optional openchat badge
+    /// ahead of it is an AXImage, and the unread "Count Label" and the timestamp
+    /// both come after it.
+    public static func chatRowName(_ row: AXUIElement) -> String? {
+        for cell in children(row) {
+            guard role(cell) == "AXCell" else { continue }
+            for child in children(cell) {
+                guard role(child) == "AXStaticText" else { continue }
+                if let name = value(child), !name.isEmpty { return name }
             }
         }
         return nil
+    }
+
+    /// Find the AXRow in a chat list whose name label matches the given text.
+    ///
+    /// Note this only sees rows in the **top-level** chat list. KakaoTalk groups
+    /// chats into folders — the `NTChatFolder` table, plus "Silent Chatroom" —
+    /// and a folder appears as a single collapsed row whose members are not
+    /// children of this table. They therefore cannot be found here at all. On my
+    /// install "Silent Chatroom" alone holds 16 of 59 chats, so `send` fails for
+    /// every one of them. Note membership is not visible in the database: only
+    /// 14 of those 16 are muted (`NTChatRoom.pushAlert = 0`), so a chat can be
+    /// filed there — and made unreachable — with no column recording it.
+    public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
+        for row in children(table) {
+            guard role(row) == "AXRow", let name = chatRowName(row) else { continue }
+            let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
+            if matches { return row }
+        }
+        return nil
+    }
+
+    /// Reach a chat that has no row in the top-level list, using KakaoTalk's own
+    /// chat search.
+    ///
+    /// Chats filed under a folder ("Silent Chatroom") are collapsed into a
+    /// single folder row, so `findChatRow` cannot see them — which is why
+    /// `send` failed for them with no recourse. They remain *searchable*, and
+    /// the results render into the **same** AXTable with the same row
+    /// structure, so `findChatRow` works on them unchanged.
+    ///
+    /// Preferred over walking into folder rows: it needs no way to recognise a
+    /// folder (the only signal is its localised "N chatrooms" preview text), it
+    /// covers user-created folders and any future grouping for free, and it is
+    /// undone by one button instead of a navigation stack.
+    ///
+    /// Always pair with `clearChatSearch` — the filter persists otherwise, and
+    /// the user is left staring at a one-row chat list.
+    public static func searchChatRow(in mainWindow: AXUIElement, chatName: String) -> AXUIElement? {
+        // Opening has to be idempotent. The Search button *toggles*, so pressing
+        // it while a field is already showing closes the search instead — which
+        // made this fail roughly one run in three. Reuse an open field, and poll
+        // for a new one rather than trusting a fixed delay.
+        var found = findAll(mainWindow, role: "AXTextField").first
+        if found == nil {
+            guard let button = findFirst(mainWindow, role: "AXButton", description: "Search") else { return nil }
+            _ = performAction(button, kAXPressAction as String)
+            for _ in 0..<15 {
+                Thread.sleep(forTimeInterval: 0.2)
+                found = findAll(mainWindow, role: "AXTextField").first
+                if found != nil { break }
+            }
+        }
+        guard let field = found else { return nil }
+        _ = focus(field)
+        Thread.sleep(forTimeInterval: 0.2)
+        if !setValue(field, chatName) {
+            typeText(chatName)
+        }
+        Thread.sleep(forTimeInterval: 1.2)
+        // Re-fetch: the table is repopulated with the filtered results.
+        guard let table = chatListTable(mainWindow) else { return nil }
+        return findChatRow(table, chatName: chatName)
+    }
+
+    /// Dismiss chat search and restore the full list. Safe to call when no
+    /// search is active, and safe to call twice.
+    ///
+    /// Verified rather than fire-and-forget, and it escalates: AXPress on the
+    /// field's own cancel button silently does nothing on this build, which left
+    /// the chat list filtered to a single row. That is bad on its own, and worse
+    /// downstream — a leftover filter makes the *next* `findChatRow` search a
+    /// one-row list, so it either misses a chat that is really there or "finds"
+    /// one in what it believes is the top-level list.
+    @discardableResult
+    public static func clearChatSearch(in mainWindow: AXUIElement) -> Bool {
+        for attempt in 0..<4 {
+            guard let field = findAll(mainWindow, role: "AXTextField").first else {
+                return true                      // no field at all — nothing to clear
+            }
+            if (value(field) ?? "").isEmpty, attempt > 0 {
+                return true                      // present but empty — list is unfiltered
+            }
+            // Raise the main window first: two of these steps are synthetic
+            // input at screen coordinates, and an open chat window sits on top
+            // of the search field, so they would land on the wrong window.
+            _ = performAction(mainWindow, kAXRaiseAction as String)
+            switch attempt {
+            case 0:
+                // The Search button toggles, so pressing it while search is open
+                // closes it. This is the only step that doesn't depend on the
+                // cancel button, whose AXPress is inert on this build.
+                if let button = findFirst(mainWindow, role: "AXButton", description: "Search") {
+                    _ = performAction(button, kAXPressAction as String)
+                }
+            case 1:
+                if let cancel = findFirst(field, role: "AXButton", description: "cancel") {
+                    _ = performAction(cancel, kAXPressAction as String)
+                }
+            case 2:
+                _ = focus(field)
+                _ = setValue(field, "")
+                pressKey(keyCode: 53)            // Escape
+            default:
+                if let cancel = findFirst(field, role: "AXButton", description: "cancel") {
+                    clickElement(cancel)
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        let remaining = findAll(mainWindow, role: "AXTextField").first
+        return remaining == nil || (value(remaining!) ?? "").isEmpty
     }
 
     /// Find the self-chat row (identified by "badge me" image in the cell).

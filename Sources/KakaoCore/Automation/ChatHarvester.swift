@@ -53,21 +53,46 @@ public enum ChatHarvester {
         options: Options,
         progress: @escaping (String) -> Void
     ) throws -> [HarvestResult] {
-        // 1. Get DB chat list ordered by lastUpdatedAt DESC (matches UI order)
+        // 1. Get the DB chat list, plus the name and last message text that let
+        //    a UI row be identified. The old code ordered by lastUpdatedAt DESC
+        //    and paired row i with chat i, on the assumption that the DB order
+        //    "matches UI order". It does not: chats filed under "Silent
+        //    Chatroom" are collapsed into a folder row and absent from the
+        //    top-level list, so the two lists differ in both length and order
+        //    and every pairing after the first hidden chat was wrong.
         let dbChats = try db.rawQuery("""
             SELECT r.chatId, r.type, r.activeMembersCount,
                    r.countOfNewMessage, r.lastUpdatedAt,
-                   (SELECT COUNT(*) FROM NTChatMessage m WHERE m.chatId = r.chatId) as msgCount
+                   (SELECT COUNT(*) FROM NTChatMessage m WHERE m.chatId = r.chatId) as msgCount,
+                   COALESCE(r.chatName, u.displayName, u.friendNickName, u.nickName) as dbName,
+                   (SELECT m.message FROM NTChatMessage m
+                     WHERE m.chatId = r.chatId ORDER BY m.sentAt DESC LIMIT 1) as lastMessage
             FROM NTChatRoom r
+            LEFT JOIN NTUser u ON r.directChatMemberUserId = u.userId AND u.linkId = 0
             ORDER BY r.lastUpdatedAt DESC
         """)
 
+        // Names via DatabaseReader.chats(), which resolves open-chat link names,
+        // room titles and group member joins. The rawQuery above only knows
+        // chatName and the direct partner, and pairing on those under-matches:
+        // an open chat would fail pass 1, fall through preview matching, and be
+        // recorded as "not in the top-level list" while plainly sitting in it.
+        // For a reachability check that false negative is the harmful direction.
+        let properNames = try db.chats(limit: 10_000)
+            .reduce(into: [Int64: String]()) { $0[$1.id] = $1.displayName }
+
         progress("Found \(dbChats.count) chats in database")
 
-        // 2. Ensure KakaoTalk is running and logged in
+        // 2. Ensure KakaoTalk is running, logged in, *and showing its window*.
+        //    ensureReady() has to be called unconditionally. A running,
+        //    logged-in KakaoTalk whose main window has been closed still
+        //    reports .loggedIn, so the old state guard skipped the one call
+        //    that reopens it — ensureWindowVisible() — and harvest then threw
+        //    noWindows from step 3. `KakaoAutomator.sendMessage` already calls
+        //    it unconditionally for exactly this reason.
         let state = AppLifecycle.detectState()
-        if state == .notRunning || state == .loginScreen {
-            try AppLifecycle.ensureReady(credentials: CredentialStore())
+        try AppLifecycle.ensureReady(credentials: CredentialStore())
+        if state != .loggedIn {
             Thread.sleep(forTimeInterval: 2.0)
         }
 
@@ -100,27 +125,51 @@ public enum ChatHarvester {
         }
 
         let allRows = AXHelpers.children(table).filter { AXHelpers.role($0) == "AXRow" }
-        progress("Found \(allRows.count) chats in UI")
+        progress("Found \(allRows.count) chats in UI, \(dbChats.count) in database")
 
-        let limit = options.maxChats > 0
-            ? min(options.maxChats, min(allRows.count, dbChats.count))
-            : min(allRows.count, dbChats.count)
+        // 7. Pair each UI row with its database chat *by identity*, never by
+        //    position. A row is matched on its name when the database already
+        //    knows one, otherwise on its last-message preview — the two lists
+        //    are different lengths in different orders, so an index is not a
+        //    join key. A row that matches nothing is skipped and reported: the
+        //    cost of a miss is a chat that keeps its existing name, while the
+        //    cost of a bad guess is a *wrong* name written onto a real chat id.
+        let pairs = pairRows(allRows, with: dbChats, names: properNames, progress: progress)
 
-        // 7. Process each chat
+        // 7b. Record top-level-list membership for EVERY chat, not just the ones
+        //     we paired. A chat's *absence* from the visible list is the whole
+        //     signal: it means the chat sits inside a folder ("Silent Chatroom"),
+        //     where findChatRow cannot reach it and `send` will fail. Nothing on
+        //     this machine records that grouping — no NTChatRoom column, no
+        //     NTChatFolder row, no NTSetting key, no container plist, and
+        //     pushAlert = 0 catches only the muted subset — so comparing the
+        //     database against the visible list is the only way to know, and a
+        //     harvest is already standing in exactly the right place to do it.
+        let seen = Set(pairs.compactMap { $0.1[0] as? Int64 })
+        var unreachable = 0
+        for chat in dbChats {
+            // chatId -1 is a sentinel, not a chat, and is never in the list.
+            guard let id = chat[0] as? Int64, id != -1 else { continue }
+            let present = seen.contains(id)
+            if !present { unreachable += 1 }
+            metadata.setInTopLevelList(chatId: id, present, name: properNames[id])
+        }
+        if unreachable > 0 {
+            progress("\(unreachable) chats are not in the top-level list — inside a folder, unreachable by `send`")
+        }
+
+        let limit = options.maxChats > 0 ? min(options.maxChats, pairs.count) : pairs.count
+
         var results: [HarvestResult] = []
 
         for i in 0..<limit {
-            let row = allRows[i]
-            let dbChat = dbChats[i]
+            let (row, dbChat, uiName) = pairs[i]
 
             let chatId = dbChat[0] as! Int64
             let chatType = Int(dbChat[1] as! Int64)
             let memberCount = Int(dbChat[2] as! Int64)
             let unreadCount = dbChat[3] as! Int64
             let msgCount = Int(dbChat[5] as! Int64)
-
-            // Get UI name from the row
-            let uiName = extractName(from: row)
 
             // Skip unread chats (safety: opening could mark as read)
             if options.skipUnread && unreadCount > 0 {
@@ -210,15 +259,88 @@ public enum ChatHarvester {
 
     /// Extract the display name from a chat list row.
     private static func extractName(from row: AXUIElement) -> String {
-        for cell in AXHelpers.children(row) {
-            guard AXHelpers.role(cell) == "AXCell" else { continue }
-            for child in AXHelpers.children(cell) {
-                if AXHelpers.role(child) == "AXStaticText" && AXHelpers.identifier(child) == "_NS:18" {
-                    return AXHelpers.value(child) ?? "(unknown)"
+        AXHelpers.chatRowName(row) ?? "(unknown)"
+    }
+
+    /// The last-message preview shown on a chat-list row, used as a join key.
+    /// Lives in an AXTextArea inside the row's AXScrollArea.
+    private static func extractPreview(from row: AXUIElement) -> String? {
+        for cell in AXHelpers.children(row) where AXHelpers.role(cell) == "AXCell" {
+            for child in AXHelpers.children(cell) where AXHelpers.role(child) == "AXScrollArea" {
+                for area in AXHelpers.children(child) where AXHelpers.role(area) == "AXTextArea" {
+                    if let text = AXHelpers.value(area), !text.isEmpty { return text }
                 }
             }
         }
-        return "(unknown)"
+        return nil
+    }
+
+    private static func normalize(_ s: String) -> String {
+        s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    /// Match UI rows to database chats by identity rather than by index.
+    ///
+    /// Two passes, most reliable first:
+    ///   1. **Name.** If the database already has a title for a chat and it
+    ///      equals the row's label, that's the chat. (These rows teach us
+    ///      nothing new, but claiming them keeps them out of pass 2.)
+    ///   2. **Last-message preview.** For rows the database can't name — the
+    ///      ones harvest exists for — the row's message preview is matched
+    ///      against the chat's most recent message. The UI truncates, so this
+    ///      is a prefix comparison, and a prefix that matches more than one
+    ///      chat is rejected as ambiguous rather than guessed.
+    ///
+    /// Rows matching nothing are dropped with a progress note.
+    private static func pairRows(
+        _ rows: [AXUIElement],
+        with dbChats: [[Any]],
+        names: [Int64: String],
+        progress: (String) -> Void
+    ) -> [(AXUIElement, [Any], String)] {
+        var byName: [String: [Any]] = [:]
+        for chat in dbChats {
+            guard let id = chat[0] as? Int64, let name = names[id], !name.isEmpty,
+                  name != "(unknown)" else { continue }
+            // Ambiguous titles can't identify a chat; drop both.
+            if byName[name] != nil { byName[name] = nil } else { byName[name] = chat }
+        }
+
+        var claimed = Set<Int64>()
+        var paired: [(AXUIElement, [Any], String)] = []
+        var deferred: [(AXUIElement, String)] = []
+
+        for row in rows {
+            guard let uiName = AXHelpers.chatRowName(row) else { continue }
+            if let chat = byName[uiName], let id = chat[0] as? Int64, !claimed.contains(id) {
+                claimed.insert(id)
+                paired.append((row, chat, uiName))
+            } else {
+                deferred.append((row, uiName))
+            }
+        }
+
+        for (row, uiName) in deferred {
+            guard let preview = extractPreview(from: row).map(normalize), preview.count >= 4 else {
+                progress("  ! \(uiName): no preview to match on — skipped")
+                continue
+            }
+            let hits = dbChats.filter { chat in
+                guard let id = chat[0] as? Int64, !claimed.contains(id),
+                      let last = chat[7] as? String else { return false }
+                return normalize(last).hasPrefix(preview)
+            }
+            guard hits.count == 1, let id = hits[0][0] as? Int64 else {
+                let why = hits.isEmpty ? "no database chat matches its preview" : "\(hits.count) chats match its preview"
+                progress("  ! \(uiName): \(why) — skipped")
+                continue
+            }
+            claimed.insert(id)
+            paired.append((row, hits[0], uiName))
+        }
+
+        progress("Paired \(paired.count) of \(rows.count) UI rows to database chats")
+        return paired
     }
 
     /// Main history loading loop for a single chat.

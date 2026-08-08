@@ -25,6 +25,9 @@ struct ChatsCommand: ParsableCommand {
         defer { reader.close() }
 
         let chats = try reader.chats(limit: limit)
+        // Reachability comes from the last harvest, not the database — the
+        // grouping isn't stored here. Absent until a harvest has run.
+        let metadata = MetadataStore()
 
         if json {
             let items = chats.map { chat -> [String: Any] in
@@ -37,6 +40,14 @@ struct ChatsCommand: ParsableCommand {
                 ]
                 if let ts = chat.lastMessageAt {
                     dict["last_message_at"] = ISO8601DateFormatter().string(from: ts)
+                }
+                // Omitted rather than null when no harvest has run: absent means
+                // "unknown", which is different from "known to be reachable".
+                // false means the chat is inside a folder and `send` can't reach
+                // it. The plain-text listing is deliberately left untouched —
+                // downstream parsers key off its exact shape.
+                if let present = metadata.info(for: chat.id)?.inTopLevelList {
+                    dict["in_top_level_list"] = present
                 }
                 return dict
             }

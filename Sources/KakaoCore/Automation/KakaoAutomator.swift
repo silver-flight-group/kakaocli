@@ -45,6 +45,11 @@ public final class KakaoAutomator {
             throw AutomationError.chatNotFound(chatName)
         }
 
+        // Restoring the list is not optional: leaving the filter applied strands
+        // the user on a one-row chat list with no indication why.
+        var usedSearch = false
+        defer { if usedSearch { AXHelpers.clearChatSearch(in: mainWindow) } }
+
         let row: AXUIElement
         if selfChat {
             guard let selfRow = AXHelpers.findSelfChatRow(table) else {
@@ -52,16 +57,42 @@ public final class KakaoAutomator {
             }
             row = selfRow
         } else {
-            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName) else {
+            // Clear any leftover filter first. A search left applied by an
+            // earlier run reduces the list to its results, so findChatRow would
+            // be searching that, not the top-level list — it could miss a chat
+            // that is present, or report a folder chat as top-level.
+            AXHelpers.clearChatSearch(in: mainWindow)
+            let table = AXHelpers.chatListTable(mainWindow) ?? table
+            if let chatRow = AXHelpers.findChatRow(table, chatName: chatName) {
+                row = chatRow
+            } else if let found = AXHelpers.searchChatRow(in: mainWindow, chatName: chatName) {
+                // Not in the top-level list — a folder holds it. KakaoTalk's own
+                // search still finds it, and renders the hit into the same table.
+                usedSearch = true
+                row = found
+            } else {
+                AXHelpers.clearChatSearch(in: mainWindow)
+                // Consult the harvest record *after* the lookup fails, never
+                // before. Checking first would let stale metadata block a send
+                // that would have worked — the user can move a chat out of a
+                // folder at any time, and nothing notifies us. Used this way it
+                // only ever explains a failure that already happened.
+                let metadata = MetadataStore()
+                if let hit = metadata.unreachableChats.first(where: {
+                    $0.name.localizedCaseInsensitiveContains(chatName)
+                        || chatName.localizedCaseInsensitiveContains($0.name)
+                }) {
+                    throw AutomationError.chatInFolder(hit.name)
+                }
                 throw AutomationError.chatNotFound(chatName)
             }
-            row = chatRow
         }
 
         // 6. Open the chat via AX row selection + Enter (works even when off-screen).
         //    Falls back to scroll-into-view + double-click if selection fails.
         var opened = false
-        if AXHelpers.selectRow(row, in: table) {
+        let activeTable = usedSearch ? (AXHelpers.chatListTable(mainWindow) ?? table) : table
+        if AXHelpers.selectRow(row, in: activeTable) {
             Thread.sleep(forTimeInterval: 0.2)
             AXHelpers.pressKey(keyCode: 36) // Enter to open
             Thread.sleep(forTimeInterval: 0.5)
@@ -87,6 +118,27 @@ public final class KakaoAutomator {
         }
         guard let chatWindow else {
             throw AutomationError.inputFieldNotFound
+        }
+
+        // 7b. Confirm we opened the chat we were asked for, before typing.
+        //
+        // findChatRow returns an AXUIElement whose activation is positional —
+        // scrollRowToVisible + doubleClickElement click at the row's screen
+        // coordinates. The chat list re-sorts every time a message arrives, so
+        // between matching the row and clicking it, a different chat can slide
+        // under those coordinates and open instead. Nothing downstream noticed:
+        // step 7 accepts *any* non-main window and step 9 types into it and
+        // presses Return.
+        //
+        // Delivering a message to the wrong person cannot be undone, so this is
+        // checked rather than assumed. The window title is the chat name.
+        let openedTitle = (AXHelpers.title(chatWindow) ?? "").trimmingCharacters(in: .whitespaces)
+        let wanted = chatName.trimmingCharacters(in: .whitespaces)
+        if !selfChat, !openedTitle.isEmpty, !wanted.isEmpty,
+           !openedTitle.localizedCaseInsensitiveContains(wanted),
+           !wanted.localizedCaseInsensitiveContains(openedTitle) {
+            _ = AXHelpers.closeWindow(chatWindow)
+            throw AutomationError.wrongChatOpened(asked: chatName, opened: openedTitle)
         }
 
         // 8. Find the message input field
@@ -142,6 +194,8 @@ public enum AutomationError: Error, CustomStringConvertible {
     case chatNotFound(String)
     case inputFieldNotFound
     case sendFailed(String)
+    case wrongChatOpened(asked: String, opened: String)
+    case chatInFolder(String)
 
     public var description: String {
         switch self {
@@ -153,6 +207,20 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "Could not find the message input field"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
+        case .chatInFolder(let name):
+            return """
+                Chat '\(name)' is inside a KakaoTalk folder (e.g. Silent Chatroom), \
+                so it has no row in the top-level chat list — and KakaoTalk's search \
+                did not turn it up either. Check the name matches the chat exactly, \
+                or move it out of the folder. Reading and syncing this chat are \
+                unaffected; only sending goes through the UI.
+                """
+        case .wrongChatOpened(let asked, let opened):
+            return """
+                Refusing to send: asked for chat '\(asked)' but '\(opened)' opened. \
+                The chat list re-sorts when messages arrive, so the click landed on \
+                a different chat. Nothing was sent — retry.
+                """
         }
     }
 }

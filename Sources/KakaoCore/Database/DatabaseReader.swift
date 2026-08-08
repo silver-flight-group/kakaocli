@@ -83,33 +83,112 @@ public final class DatabaseReader: @unchecked Sendable {
 
     // MARK: - Queries
 
-    /// List all chat rooms.
+    /// Display names for every user, resolved once. Group chats are named from
+    /// their members, so without this it would be a query per row.
+    private var userNamesCache: [Int64: String]?
+
+    private func userNames() throws -> [Int64: String] {
+        if let userNamesCache { return userNamesCache }
+        let pairs = try query(
+            "SELECT userId, COALESCE(displayName, friendNickName, nickName) FROM NTUser",
+            bind: []
+        ) { ($0.int64(0), $0.string(1) ?? "") }
+        let map = pairs.reduce(into: [Int64: String]()) { acc, pair in
+            if !pair.1.isEmpty { acc[pair.0] = pair.1 }
+        }
+        userNamesCache = map
+        return map
+    }
+
+    /// List all chat rooms, named the way KakaoTalk names them.
+    ///
+    /// The previous version considered only `chatName` and the direct-chat
+    /// partner, which left group chats and open chats as "(unknown)" — 9 of 60
+    /// rooms on my install, all of them indistinguishable from each other. The
+    /// name is actually assembled from four more places, and taking them in
+    /// this order reproduces the desktop app's list exactly (verified against a
+    /// live accessibility dump: every visible row matched, and the only names
+    /// produced that the app doesn't show are the ones it hides behind its
+    /// "Silent Chatroom" folder):
+    ///
+    ///   1. `NTChatRoom.chatName` — a name set on the room itself.
+    ///   2. `NTChatMeta.content` where `type = 3` — the room title, which is
+    ///      where a renamed group chat actually stores its name.
+    ///   3. `NTOpenLink.linkName` via `linkId` — open chats are named by their
+    ///      link, and nothing on the chat row carries it.
+    ///   4. The other participant, for a direct chat.
+    ///   5. Otherwise the member names joined with ", " — how KakaoTalk labels
+    ///      an unnamed group chat. Self is excluded and the rest sorted by user
+    ///      id, which is the order the app displays them in.
+    ///
+    /// `chatId = -1` is excluded: it is a sentinel with no members and no name,
+    /// not a chat, and the app doesn't list it either.
     public func chats(limit: Int = 50) throws -> [Chat] {
+        let users = try userNames()
+        let me = Int64((try? DeviceInfo.userId()) ?? 0)
         let sql = """
             SELECT r.chatId, r.type, r.chatName, r.activeMembersCount,
                    r.lastLogId, r.lastUpdatedAt, r.countOfNewMessage,
-                   u.displayName, u.friendNickName, u.nickName
+                   u.displayName, u.friendNickName, u.nickName,
+                   o.linkName, m.content, r.displayMemberIds
             FROM NTChatRoom r
             LEFT JOIN NTUser u ON r.directChatMemberUserId = u.userId AND u.linkId = 0
+            LEFT JOIN NTOpenLink o ON o.linkId = r.linkId
+            LEFT JOIN NTChatMeta m ON m.chatId = r.chatId AND m.type = 3
+            WHERE r.chatId != -1
             ORDER BY r.lastUpdatedAt DESC
             LIMIT ?
             """
         return try query(sql, bind: [.int(limit)]) { row in
-            // For direct chats, use the friend's name; for groups, use chatName
-            let chatName = row.string(2)
-            let displayName = row.string(7) ?? row.string(8) ?? row.string(9)
-            let name = chatName ?? displayName ?? "(unknown)"
-
-            return Chat(
+            Chat(
                 id: row.int64(0),
                 type: Chat.ChatType.from(rawInt: row.int(1)),
-                displayName: name,
+                displayName: Self.chatDisplayName(
+                    chatName: row.string(2),
+                    metaTitle: row.string(11),
+                    linkName: row.string(10),
+                    directPartner: row.string(7) ?? row.string(8) ?? row.string(9),
+                    memberIds: row.blob(12),
+                    users: users,
+                    selfUserId: me
+                ),
                 memberCount: row.int(3),
                 lastMessageId: row.optionalInt64(4),
                 lastMessageAt: row.optionalKakaoDate(5),
                 unreadCount: row.int(6)
             )
         }
+    }
+
+    /// See `chats(limit:)` for why the order of these fallbacks is what it is.
+    static func chatDisplayName(
+        chatName: String?,
+        metaTitle: String?,
+        linkName: String?,
+        directPartner: String?,
+        memberIds: Data?,
+        users: [Int64: String],
+        selfUserId: Int64
+    ) -> String {
+        for candidate in [chatName, metaTitle, linkName, directPartner] {
+            if let candidate, !candidate.isEmpty { return candidate }
+        }
+        if let memberIds, let ids = decodeMemberIds(memberIds) {
+            let names = ids.filter { $0 != selfUserId }.sorted().compactMap { users[$0] }
+            if !names.isEmpty { return names.joined(separator: ", ") }
+        }
+        return "(unknown)"
+    }
+
+    /// `displayMemberIds` is a binary plist holding an array of user ids.
+    static func decodeMemberIds(_ data: Data) -> [Int64]? {
+        guard !data.isEmpty,
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data, options: [], format: nil
+              ),
+              let numbers = plist as? [NSNumber]
+        else { return nil }
+        return numbers.map(\.int64Value)
     }
 
     /// Get messages for a chat, optionally filtered by time.
@@ -343,6 +422,13 @@ public final class DatabaseReader: @unchecked Sendable {
 
         func bool(_ col: Int32) -> Bool {
             sqlite3_column_int(stmt, col) != 0
+        }
+
+        func blob(_ col: Int32) -> Data? {
+            guard let bytes = sqlite3_column_blob(stmt, col) else { return nil }
+            let count = Int(sqlite3_column_bytes(stmt, col))
+            guard count > 0 else { return nil }
+            return Data(bytes: bytes, count: count)
         }
 
         /// KakaoTalk stores timestamps as seconds since epoch.
