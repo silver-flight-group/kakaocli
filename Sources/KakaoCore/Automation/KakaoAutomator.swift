@@ -45,6 +45,11 @@ public final class KakaoAutomator {
             throw AutomationError.chatNotFound(chatName)
         }
 
+        // Restoring the list is not optional: leaving the filter applied strands
+        // the user on a one-row chat list with no indication why.
+        var usedSearch = false
+        defer { if usedSearch { AXHelpers.clearChatSearch(in: mainWindow) } }
+
         let row: AXUIElement
         if selfChat {
             guard let selfRow = AXHelpers.findSelfChatRow(table) else {
@@ -52,7 +57,21 @@ public final class KakaoAutomator {
             }
             row = selfRow
         } else {
-            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName) else {
+            // Clear any leftover filter first. A search left applied by an
+            // earlier run reduces the list to its results, so findChatRow would
+            // be searching that, not the top-level list — it could miss a chat
+            // that is present, or report a folder chat as top-level.
+            AXHelpers.clearChatSearch(in: mainWindow)
+            let table = AXHelpers.chatListTable(mainWindow) ?? table
+            if let chatRow = AXHelpers.findChatRow(table, chatName: chatName) {
+                row = chatRow
+            } else if let found = AXHelpers.searchChatRow(in: mainWindow, chatName: chatName) {
+                // Not in the top-level list — a folder holds it. KakaoTalk's own
+                // search still finds it, and renders the hit into the same table.
+                usedSearch = true
+                row = found
+            } else {
+                AXHelpers.clearChatSearch(in: mainWindow)
                 // Consult the harvest record *after* the lookup fails, never
                 // before. Checking first would let stale metadata block a send
                 // that would have worked — the user can move a chat out of a
@@ -67,13 +86,13 @@ public final class KakaoAutomator {
                 }
                 throw AutomationError.chatNotFound(chatName)
             }
-            row = chatRow
         }
 
         // 6. Open the chat via AX row selection + Enter (works even when off-screen).
         //    Falls back to scroll-into-view + double-click if selection fails.
         var opened = false
-        if AXHelpers.selectRow(row, in: table) {
+        let activeTable = usedSearch ? (AXHelpers.chatListTable(mainWindow) ?? table) : table
+        if AXHelpers.selectRow(row, in: activeTable) {
             Thread.sleep(forTimeInterval: 0.2)
             AXHelpers.pressKey(keyCode: 36) // Enter to open
             Thread.sleep(forTimeInterval: 0.5)
