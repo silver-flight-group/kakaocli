@@ -210,9 +210,10 @@ public enum AutomationError: Error, CustomStringConvertible {
         case .chatInFolder(let name):
             return """
                 Chat '\(name)' is inside a KakaoTalk folder (e.g. Silent Chatroom), \
-                so it has no row in the top-level chat list and cannot be opened by \
-                automation. Move it out of the folder in KakaoTalk to send to it. \
-                Reading and syncing this chat are unaffected.
+                so it has no row in the top-level chat list — and KakaoTalk's search \
+                did not turn it up either. Check the name matches the chat exactly, \
+                or move it out of the folder. Reading and syncing this chat are \
+                unaffected; only sending goes through the UI.
                 """
         case .wrongChatOpened(let asked, let opened):
             return """
