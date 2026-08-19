@@ -9,7 +9,7 @@ struct StatusCommand: ParsableCommand {
     )
 
     func run() throws {
-        let appPath = "/Applications/KakaoTalk.app"
+        let appPath = AppLifecycle.appPath
         let containerExists = FileManager.default.fileExists(atPath: DeviceInfo.containerPath)
         let globalPlistExists = FileManager.default.fileExists(atPath: DeviceInfo.preferencesPath)
         let containerPlistExists = FileManager.default.fileExists(atPath: DeviceInfo.containerPreferencesPath)
