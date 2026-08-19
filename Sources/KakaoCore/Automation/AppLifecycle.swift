@@ -16,7 +16,14 @@ public enum KakaoAppState: String, Sendable {
 public enum AppLifecycle {
 
     public static let bundleId = KakaoAutomator.bundleId
-    public static let appPath = "/Applications/KakaoTalk.app"
+    /// Resolve the installed app path by bundle id (localized names like
+    /// "카카오톡.app" break a hardcoded /Applications/KakaoTalk.app — issue #22).
+    public static let appPath: String = {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            return url.path
+        }
+        return "/Applications/KakaoTalk.app"
+    }()
 
     // MARK: - State Detection
 
