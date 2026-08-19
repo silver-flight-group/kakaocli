@@ -191,37 +191,67 @@ public enum DeviceInfo {
         return nil
     }
 
+    /// Thread-safe holder for the parallel SHA-512 brute-force result.
+    /// @unchecked Sendable: all mutable access is guarded by `lock`.
+    private final class BruteForceResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _found: Int?
+        private var _stop = false
+        var stopped: Bool { lock.lock(); defer { lock.unlock() }; return _stop }
+        var value: Int? { lock.lock(); defer { lock.unlock() }; return _found }
+        func record(_ id: Int) { lock.lock(); _found = id; _stop = true; lock.unlock() }
+        func stop() { lock.lock(); _stop = true; lock.unlock() }
+    }
+
     /// Recover a userId by brute-forcing the SHA-512 pre-image.
-    /// KakaoTalk stores SHA-512(userId) as hex in plist keys. Since userIds are
-    /// typically small integers, this is fast (< 1 second for IDs under 1M).
-    /// Searches up to 1 billion with a 10-second timeout.
+    /// KakaoTalk stores SHA-512(userId) as hex in plist keys. Modern Kakao account
+    /// numbers are 8-10 digit integers (hundreds of millions), so the original
+    /// single-threaded 0..1e9 / 10s scan timed out before reaching them (issue #4).
+    /// This version shards the range across all cores and raises the ceiling.
     public static func recoverUserIdFromSHA512(hexHash: String) -> Int? {
         guard hexHash.count == 128 else { return nil }
         // Parse target hash to bytes
         var targetBytes = [UInt8](repeating: 0, count: 64)
-        var hexChars = Array(hexHash)
+        let hexChars = Array(hexHash)
         for i in 0..<64 {
             guard let byte = UInt8(String(hexChars[i*2...i*2+1]), radix: 16) else { return nil }
             targetBytes[i] = byte
         }
+        let target = targetBytes
 
         let startTime = CFAbsoluteTimeGetCurrent()
-        let maxId = 1_000_000_000
-        var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+        // Kakao account numbers currently top out around 5e9; cap generously.
+        let maxId = 5_000_000_000
+        let timeoutSeconds = 120.0
+        let workers = max(2, ProcessInfo.processInfo.activeProcessorCount)
+        let chunk = (maxId + workers - 1) / workers
+        let result = BruteForceResult()
 
-        for i in 0..<maxId {
-            let s = String(i)
-            let data = Array(s.utf8)
-            CC_SHA512(data, CC_LONG(data.count), &hash)
-            if hash == targetBytes {
-                return i
-            }
-            // Timeout after 10 seconds
-            if i % 5_000_000 == 0 && i > 0 {
-                if CFAbsoluteTimeGetCurrent() - startTime > 10 { return nil }
+        DispatchQueue.concurrentPerform(iterations: workers) { w in
+            let lo = w * chunk
+            let hi = min(lo + chunk, maxId)
+            var hash = [UInt8](repeating: 0, count: Int(CC_SHA512_DIGEST_LENGTH))
+            var i = lo
+            while i < hi {
+                if result.stopped { return }
+                let s = String(i)
+                let data = Array(s.utf8)
+                CC_SHA512(data, CC_LONG(data.count), &hash)
+                if hash == target {
+                    result.record(i)
+                    return
+                }
+                // Cheap periodic timeout / cancellation check.
+                if i & 0x3F_FFFF == 0 && i > lo {
+                    if CFAbsoluteTimeGetCurrent() - startTime > timeoutSeconds {
+                        result.stop()
+                        return
+                    }
+                }
+                i += 1
             }
         }
-        return nil
+        return result.value
     }
 
     private static func longestCommonSuffix(_ strings: [String]) -> String? {
