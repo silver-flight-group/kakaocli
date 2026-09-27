@@ -10,6 +10,7 @@ struct KakaoCLI: ParsableCommand {
             AuthCommand.self,
             ChatsCommand.self,
             HarvestCommand.self,
+            HistoryCommand.self,
             InspectCommand.self,
             LoginCommand.self,
             MessagesCommand.self,
