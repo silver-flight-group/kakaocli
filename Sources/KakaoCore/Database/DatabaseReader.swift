@@ -183,6 +183,83 @@ public final class DatabaseReader: @unchecked Sendable {
         }
     }
 
+    /// Keyset-paginated message query. All filter values are bound parameters.
+    ///
+    /// Messages are ordered by (sentAt, logId). With `after`, results are
+    /// oldest-first starting just after the cursor; otherwise newest-first
+    /// (starting just before `before`, or at the newest message).
+    public func messageHistory(_ q: HistoryQuery) throws -> [HistoryMessage] {
+        var conditions: [String] = []
+        var bindings: [SQLValue] = []
+
+        if let chatId = q.chatId {
+            conditions.append("m.chatId = ?")
+            bindings.append(.int64(chatId))
+        }
+        if !q.excludeChatIds.isEmpty {
+            conditions.append("m.chatId NOT IN (" + q.excludeChatIds.map { _ in "?" }.joined(separator: ",") + ")")
+            bindings += q.excludeChatIds.map { .int64($0) }
+        }
+        if let logId = q.logId {
+            conditions.append("m.logId = ?")
+            bindings.append(.int64(logId))
+        }
+        if let since = q.since {
+            conditions.append("m.sentAt >= ?")
+            bindings.append(.int64(since))
+        }
+        if let until = q.until {
+            conditions.append("m.sentAt <= ?")
+            bindings.append(.int64(until))
+        }
+        if let before = q.before {
+            conditions.append("(m.sentAt < ? OR (m.sentAt = ? AND m.logId < ?))")
+            bindings += [.int64(before.sentAt), .int64(before.sentAt), .int64(before.logId)]
+        }
+        if let after = q.after {
+            conditions.append("(m.sentAt > ? OR (m.sentAt = ? AND m.logId > ?))")
+            bindings += [.int64(after.sentAt), .int64(after.sentAt), .int64(after.logId)]
+        }
+        if let contains = q.contains {
+            let escaped = contains
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            conditions.append("m.message LIKE ? ESCAPE '\\'")
+            bindings.append(.string("%\(escaped)%"))
+        }
+
+        let where_ = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+        let direction = q.after != nil ? "ASC" : "DESC"
+        let sql = """
+            SELECT m.logId, m.chatId, m.authorId,
+                   (SELECT COALESCE(NULLIF(u.displayName, ''), NULLIF(u.friendNickName, ''), NULLIF(u.nickName, ''))
+                      FROM NTUser u WHERE u.userId = m.authorId ORDER BY u.linkId LIMIT 1),
+                   m.message, m.type, m.sentAt, m.attachment, m.localFilePath
+            FROM NTChatMessage m
+            \(where_)
+            ORDER BY m.sentAt \(direction), m.logId \(direction)
+            LIMIT ?
+            """
+        bindings.append(.int(q.limit))
+
+        let myUserId = try self.myUserId()
+        return try query(sql, bind: bindings) { row in
+            HistoryMessage(
+                logId: row.int64(0),
+                chatId: row.int64(1),
+                senderId: row.int64(2),
+                senderName: row.string(3),
+                text: row.string(4),
+                typeCode: row.int(5),
+                sentAt: row.int64(6),
+                attachment: row.string(7),
+                localFilePath: row.string(8),
+                isFromMe: row.int64(2) == myUserId
+            )
+        }
+    }
+
     /// Get the logged-in user's ID from NTChatContext.
     public func myUserId() throws -> Int64 {
         let results = try query("SELECT userId FROM NTChatContext LIMIT 1", bind: []) { row in
