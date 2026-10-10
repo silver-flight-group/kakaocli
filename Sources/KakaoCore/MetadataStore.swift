@@ -12,20 +12,32 @@ public final class MetadataStore {
         public var messageCount: Int?
     }
 
-    private let filePath: String
+    private let fileURL: URL
     private var chats: [String: ChatInfo]
 
-    public init() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".kakaocli")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        filePath = dir.appendingPathComponent("metadata.json").path
+    /// A load failure blocks saving so corrupt or unreadable metadata is never
+    /// replaced by a silently empty store. Reopen the store after repairing it.
+    public private(set) var loadError: Error?
 
-        if let data = FileManager.default.contents(atPath: filePath),
-           let decoded = try? JSONDecoder().decode([String: ChatInfo].self, from: data) {
-            chats = decoded
-        } else {
-            chats = [:]
+    public convenience init() {
+        let fileURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kakaocli/metadata.json")
+        self.init(fileURL: fileURL)
+    }
+
+    /// A separate location keeps unit tests isolated from the user's metadata.
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+        chats = [:]
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            chats = try decoder.decode([String: ChatInfo].self, from: data)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            // A store that has not been created yet starts empty.
+        } catch {
+            loadError = error
         }
     }
 
@@ -50,11 +62,14 @@ public final class MetadataStore {
     }
 
     public func save() throws {
+        if let loadError { throw loadError }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(chats)
-        try data.write(to: URL(fileURLWithPath: filePath))
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try data.write(to: fileURL, options: .atomic)
     }
 
     public var allChats: [String: ChatInfo] {
@@ -63,3 +78,4 @@ public final class MetadataStore {
 
     public var count: Int { chats.count }
 }
+

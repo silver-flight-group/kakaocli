@@ -8,7 +8,7 @@ struct SendCommand: ParsableCommand {
         abstract: "Send a message via UI automation"
     )
 
-    @Argument(help: "Chat name to send to (substring match), or any value with --self")
+    @Argument(help: "Exact, unique chat name to send to, or any value with --me")
     var chat: String
 
     @Argument(help: "Message text to send")
@@ -32,3 +32,4 @@ struct SendCommand: ParsableCommand {
         print("Message sent to '\(target)'.")
     }
 }
+

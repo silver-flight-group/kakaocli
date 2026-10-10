@@ -8,149 +8,183 @@ public final class KakaoAutomator {
 
     public init() {}
 
-    /// Send a message to a chat by navigating the UI.
+    /// Send only to a unique, exact chat name (or the unique self-chat row).
     public func sendMessage(to chatName: String, message: String, selfChat: Bool = false) throws {
-        // 1. Ensure KakaoTalk is running and logged in
+        try SendWorkflow(ui: KakaoSendUI()).send(to: chatName, message: message, selfChat: selfChat)
+    }
+}
+
+private final class KakaoSendUI: SendUI {
+    private var app: AXUIElement?
+
+    func prepare() throws {
         let stateBefore = AppLifecycle.detectState()
         try AppLifecycle.ensureReady(credentials: CredentialStore())
-        if stateBefore != .loggedIn {
-            Thread.sleep(forTimeInterval: 2.0)
-        }
+        if stateBefore != .loggedIn { wait(2.0) }
+        try AXHelpers.activateApp(bundleId: KakaoAutomator.bundleId)
+        app = try AXHelpers.appElement(bundleId: KakaoAutomator.bundleId)
+    }
 
-        // 2. Activate KakaoTalk and get windows
-        try AXHelpers.activateApp(bundleId: Self.bundleId)
-        let app = try AXHelpers.appElement(bundleId: Self.bundleId)
-
-        let windows = AXHelpers.windows(app)
-        guard let mainWindow = windows.first(where: { AXHelpers.identifier($0) == "Main Window" }) else {
-            throw AutomationError.noWindows
+    func windows() -> [SendWindow<AXUIElement>] {
+        guard let app else { return [] }
+        return AXHelpers.windows(app).map {
+            SendWindow(element: $0, identifier: AXHelpers.identifier($0),
+                       title: AXHelpers.title($0), isWindow: AXHelpers.role($0) == "AXWindow")
         }
+    }
 
-        // 3. Close any existing chat windows to avoid sending to the wrong one
-        for w in windows where AXHelpers.identifier(w) != "Main Window" {
-            _ = AXHelpers.closeWindow(w)
-        }
-        if windows.count > 1 {
-            Thread.sleep(forTimeInterval: 0.3)
-        }
+    func sameElement(_ lhs: AXUIElement, _ rhs: AXUIElement) -> Bool { CFEqual(lhs, rhs) }
+    func closeWindow(_ window: AXUIElement) -> Bool { AXHelpers.closeWindow(window) }
+    func wait(_ interval: TimeInterval) { Thread.sleep(forTimeInterval: interval) }
 
-        // 4. Ensure we're on the Chats tab
-        if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") {
-            _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
-            Thread.sleep(forTimeInterval: 0.3)
+    func chatRows(in mainWindow: AXUIElement) throws -> [SendChatRow<AXUIElement>] {
+        guard let tab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms"),
+              AXHelpers.performAction(tab, kAXPressAction as String) else {
+            throw AutomationError.sendFailed("Could not select the Chats tab")
         }
-
-        // 5. Find the chat row in the list
+        wait(0.3)
         guard let table = AXHelpers.chatListTable(mainWindow) else {
-            throw AutomationError.chatNotFound(chatName)
+            throw AutomationError.sendFailed("Could not find the chat list")
         }
-
-        let row: AXUIElement
-        if selfChat {
-            guard let selfRow = AXHelpers.findSelfChatRow(table) else {
-                throw AutomationError.chatNotFound("self-chat (나와의 채팅)")
+        return AXHelpers.children(table).filter { AXHelpers.role($0) == "AXRow" }.map { row in
+            let labels = AXHelpers.children(row).filter { AXHelpers.role($0) == "AXCell" }
+                .flatMap { AXHelpers.children($0) }
+            let nameLabels = labels.filter {
+                AXHelpers.role($0) == "AXStaticText" && AXHelpers.identifier($0) == "_NS:18"
             }
-            row = selfRow
-        } else {
-            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName) else {
-                throw AutomationError.chatNotFound(chatName)
+            let isSelf = labels.contains {
+                AXHelpers.role($0) == "AXImage" && (AXHelpers.description($0) ?? "").contains("badge me")
             }
-            row = chatRow
+            return SendChatRow(element: row, name: nameLabels.count == 1 ? AXHelpers.value(nameLabels[0]) : nil,
+                               isSelfChat: isSelf)
         }
-
-        // 6. Open the chat via AX row selection + Enter (works even when off-screen).
-        //    Falls back to scroll-into-view + double-click if selection fails.
-        var opened = false
-        if AXHelpers.selectRow(row, in: table) {
-            Thread.sleep(forTimeInterval: 0.2)
-            AXHelpers.pressKey(keyCode: 36) // Enter to open
-            Thread.sleep(forTimeInterval: 0.5)
-            let checkWindows = AXHelpers.windows(app)
-            opened = checkWindows.contains { AXHelpers.identifier($0) != "Main Window" }
-        }
-        if !opened {
-            if let scrollArea = AXHelpers.chatListScrollArea(mainWindow) {
-                _ = AXHelpers.scrollRowToVisible(row, in: scrollArea)
-                Thread.sleep(forTimeInterval: 0.3)
-            }
-            AXHelpers.doubleClickElement(row)
-        }
-
-        // 7. Wait for the chat window to appear
-        var chatWindow: AXUIElement?
-        let windowDeadline = Date().addingTimeInterval(5.0)
-        while Date() < windowDeadline {
-            Thread.sleep(forTimeInterval: 0.5)
-            let updatedWindows = AXHelpers.windows(app)
-            chatWindow = updatedWindows.first(where: { AXHelpers.identifier($0) != "Main Window" })
-            if chatWindow != nil { break }
-        }
-        guard let chatWindow else {
-            throw AutomationError.inputFieldNotFound
-        }
-
-        // 8. Find the message input field
-        guard let inputField = findInputField(in: chatWindow) else {
-            throw AutomationError.inputFieldNotFound
-        }
-
-        // 9. Focus and type the message
-        _ = AXHelpers.performAction(chatWindow, kAXRaiseAction as String)
-        Thread.sleep(forTimeInterval: 0.3)
-        AXHelpers.clickElement(inputField)
-        Thread.sleep(forTimeInterval: 0.3)
-
-        if AXHelpers.setValue(inputField, message) {
-            Thread.sleep(forTimeInterval: 0.2)
-            AXHelpers.pressKey(keyCode: 36) // Return key
-        } else {
-            _ = AXHelpers.focus(inputField)
-            Thread.sleep(forTimeInterval: 0.1)
-            AXHelpers.typeText(message)
-            Thread.sleep(forTimeInterval: 0.2)
-            AXHelpers.pressKey(keyCode: 36) // Return key
-        }
-
-        // 10. Close the chat window
-        Thread.sleep(forTimeInterval: 0.3)
-        _ = AXHelpers.closeWindow(chatWindow)
     }
 
-    /// Find the message input AXTextArea in a chat window.
-    /// The input is in a top-level AXScrollArea that does NOT contain an AXTable (messages).
-    private func findInputField(in window: AXUIElement) -> AXUIElement? {
-        for child in AXHelpers.children(window) {
-            guard AXHelpers.role(child) == "AXScrollArea" else { continue }
-            // The message list scroll area contains an AXTable; the input one doesn't
-            let hasTable = AXHelpers.children(child).contains { AXHelpers.role($0) == "AXTable" }
-            if !hasTable {
-                // This scroll area should contain the input AXTextArea
-                for subchild in AXHelpers.children(child) {
-                    if AXHelpers.role(subchild) == "AXTextArea" {
-                        return subchild
-                    }
-                }
-            }
+    func openChat(_ row: AXUIElement, in mainWindow: AXUIElement) throws {
+        guard AXHelpers.performAction(mainWindow, kAXRaiseAction as String),
+              let table = AXHelpers.chatListTable(mainWindow) else {
+            throw AutomationError.sendFailed("Could not activate the chat list")
         }
-        return nil
+        wait(0.3)
+        guard isFocusedWindow(mainWindow) else {
+            throw AutomationError.sendFailed("The chat list window is not focused")
+        }
+        guard AXHelpers.selectRow(row, in: table), AXHelpers.focus(table) else {
+            throw AutomationError.sendFailed("Could not select and focus the chat list")
+        }
+        wait(0.2)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(table, kAXSelectedRowsAttribute as CFString, &value) == .success,
+              let selected = value as? [AXUIElement], selected.count == 1,
+              let selectedRow = selected.first, sameElement(selectedRow, row),
+              isFocused(table, in: mainWindow) else {
+            throw AutomationError.sendFailed("Could not verify the selected chat row and table focus")
+        }
+        // Coordinate-based fallback cannot guarantee which app receives a click.
+        try pressReturn(validating: {
+            var value: AnyObject?
+            guard AXUIElementCopyAttributeValue(table, kAXSelectedRowsAttribute as CFString, &value) == .success,
+                  let selected = value as? [AXUIElement], selected.count == 1,
+                  let selectedRow = selected.first, self.sameElement(selectedRow, row) else { return false }
+            return self.isFocused(table, in: mainWindow)
+        })
     }
 
+    func inputField(in window: AXUIElement) -> AXUIElement? {
+        let inputs = AXHelpers.children(window).filter { AXHelpers.role($0) == "AXScrollArea" }
+            .filter { area in !AXHelpers.children(area).contains { AXHelpers.role($0) == "AXTable" } }
+            .flatMap { AXHelpers.children($0) }.filter { AXHelpers.role($0) == "AXTextArea" }
+        return inputs.count == 1 ? inputs.first : nil
+    }
+
+    func focusInput(_ input: AXUIElement, in window: AXUIElement) throws {
+        guard AXHelpers.performAction(window, kAXRaiseAction as String) else {
+            throw AutomationError.sendFailed("Could not raise the selected chat window")
+        }
+        wait(0.3)
+        guard AXHelpers.focus(input) else {
+            throw AutomationError.sendFailed("Could not focus the verified message input")
+        }
+        wait(0.1)
+    }
+
+    private func focusedElement(_ attribute: String) -> AXUIElement? {
+        guard let app else { return nil }
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    private func isFocusedWindow(_ window: AXUIElement) -> Bool {
+        guard let app, let focused = focusedElement(kAXFocusedWindowAttribute as String) else { return false }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(app, &pid) == .success,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return false }
+        return sameElement(focused, window)
+    }
+
+    func isFocused(_ input: AXUIElement, in window: AXUIElement) -> Bool {
+        guard isFocusedWindow(window), let focused = focusedElement(kAXFocusedUIElementAttribute as String) else {
+            return false
+        }
+        return sameElement(focused, input)
+    }
+
+    func setMessage(_ message: String, in input: AXUIElement) -> Bool { AXHelpers.setValue(input, message) }
+    func messageValue(in input: AXUIElement) -> String? { AXHelpers.value(input) }
+
+    func submitMessage(_ message: String, in input: AXUIElement, window: AXUIElement,
+                       main: AXUIElement, title: String) throws {
+        try pressReturn(validating: {
+            let windows = self.windows()
+            let mains = windows.filter { $0.identifier == "Main Window" }
+            let chats = windows.filter { !self.sameElement($0.element, main) }
+            guard windows.count == 2, windows.allSatisfy({ $0.isWindow }),
+                  mains.count == 1, let currentMain = mains.first,
+                  self.sameElement(currentMain.element, main),
+                  chats.count == 1, let chat = chats.first,
+                  self.sameElement(chat.element, window), chat.title == title,
+                  let currentInput = self.inputField(in: window), self.sameElement(currentInput, input),
+                  self.messageValue(in: input) == message else { return false }
+            return self.isFocused(input, in: window)
+        })
+    }
+
+    private func pressReturn(validating targetIsValid: () -> Bool) throws {
+        guard let app else { throw AutomationError.noWindows }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(app, &pid) == .success,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let down = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: false) else {
+            throw AutomationError.sendFailed("Could not send a key to KakaoTalk")
+        }
+        guard targetIsValid() else {
+            throw AutomationError.sendFailed("The target or focus changed before Return")
+        }
+        down.postToPid(pid)
+        up.postToPid(pid)
+    }
 }
 
 public enum AutomationError: Error, CustomStringConvertible {
     case noWindows
     case chatNotFound(String)
+    case ambiguousChat(String)
     case inputFieldNotFound
     case sendFailed(String)
 
     public var description: String {
         switch self {
         case .noWindows:
-            return "KakaoTalk has no open windows"
+            return "KakaoTalk has no uniquely identifiable main window"
         case .chatNotFound(let name):
-            return "Chat '\(name)' not found in the chat list"
+            return "Chat '\(name)' not found in the chat list (an exact name is required)"
+        case .ambiguousChat(let name):
+            return "Multiple chats match '\(name)'; refusing to choose a recipient"
         case .inputFieldNotFound:
-            return "Could not find the message input field"
+            return "Could not find a unique message input field"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
         }

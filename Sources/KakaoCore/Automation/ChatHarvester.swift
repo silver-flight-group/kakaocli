@@ -53,6 +53,9 @@ public enum ChatHarvester {
         options: Options,
         progress: @escaping (String) -> Void
     ) throws -> [HarvestResult] {
+        // Stop before any database or UI work when persistence is already known to fail.
+        if let error = metadata.loadError { throw error }
+
         // 1. Get DB chat list ordered by lastUpdatedAt DESC (matches UI order)
         let dbChats = try db.rawQuery("""
             SELECT r.chatId, r.type, r.activeMembersCount,

@@ -231,7 +231,7 @@ Returns JSON array with per-chat results:
 | `Keychain error` | Run `kakaocli login --clear` then re-store credentials |
 | `No login window found` | KakaoTalk window may be hidden — run `kakaocli login --status` to check |
 | `Login did not succeed` | Verify credentials: `kakaocli login --email ... --password ...` |
-| `Chat not found` | Use exact substring match — run `kakaocli chats` to see available names |
+| `Chat not found` | For `send`, use an exact, unique name — run `kakaocli chats` to see available names |
 | `No open windows` | KakaoTalk may need manual interaction first time — open it once manually |
 | Login works but send fails | Window may need time to load — retry after 2-3 seconds |
 
@@ -242,3 +242,4 @@ Returns JSON array with per-chat results:
 3. **Rate limit sends** — at least 2 seconds between messages.
 4. **Respect hours** — avoid sending between 11 PM and 7 AM unless urgent.
 5. **Confirm before sending** — agents should verify message content with the user before sending to others.
+

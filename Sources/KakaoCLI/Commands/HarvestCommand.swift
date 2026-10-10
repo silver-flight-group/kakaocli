@@ -46,6 +46,7 @@ struct HarvestCommand: ParsableCommand {
         defer { reader.close() }
 
         let metadata = MetadataStore()
+        if let error = metadata.loadError { throw error }
 
         if dryRun {
             let limit = top > 0 ? top : 1000

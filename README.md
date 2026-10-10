@@ -151,6 +151,17 @@ kakaocli send --me _ "message"         # Send to self-chat (나와의 채팅)
 kakaocli send --dry-run "name" "msg"   # Preview without sending
 ```
 
+Sending requires an exact, unique chat name. Partial names, duplicate names, and unreadable
+chat names are rejected. Opening a chat requires verified AX row selection and table focus;
+coordinate-based opening and global typing fallbacks are disabled.
+The newly opened window must have the same exact title, and the message input and focus
+must remain verifiable. If KakaoTalk does not expose this information, sending stops
+without submitting the message. `--dry-run` prints a plan; it does not validate the live UI.
+
+전송할 때는 채팅방 이름이 정확히 일치하고 고유해야 합니다. 부분 일치나 중복 이름은 거부됩니다.
+새 창의 제목과 입력 필드, 포커스를 확인할 수 없으면 전송을 중단합니다.
+`--dry-run`은 계획만 출력하며 실제 UI를 검증하지 않습니다.
+
 ### Sync / 동기화
 
 ```bash
@@ -315,6 +326,14 @@ kakaocli는 카카오톡의 로컬 SQLCipher 암호화 데이터베이스를 **�
 >
 > 이 도구는 사용자 본인의 컴퓨터에 저장된 본인의 데이터에만 접근합니다. 책임감 있게 사용하시기 바랍니다. 카카오의 계정 제한 등 이 소프트웨어 사용으로 인한 결과에 대해 저자는 책임지지 않습니다.
 
+## Development tests
+
+On macOS 14+ with Swift 6 and `sqlcipher` installed, run `swift test`.
+Unreadable or invalid metadata blocks harvest before UI automation and cannot be overwritten.
+
+The send regression tests use a fake UI backend: they do not launch KakaoTalk,
+read credentials, or send messages. Metadata tests use temporary directories.
+
 ## Credits / 크레딧
 
 Developed by **[Brian ByungHyun Shin](https://github.com/brianshin22)** at **[Silver Flight Group](https://github.com/silver-flight-group)**.
@@ -330,3 +349,4 @@ Built with [Claude Code](https://claude.ai/code).
 MIT License. Copyright (c) 2026 Silver Flight Group, LLC. See [LICENSE](LICENSE) for details.
 
 ## [Changelog](CHANGELOG.md)
+
