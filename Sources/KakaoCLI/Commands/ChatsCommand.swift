@@ -56,69 +56,7 @@ struct ChatsCommand: ParsableCommand {
 }
 
 func openDatabase(dbPath: String?, key: String?, userId userIdOverride: Int? = nil) throws -> DatabaseReader {
-    let path: String
-    let secureKey: String?
-
-    if let dbPath {
-        path = dbPath
-        secureKey = key
-    } else {
-        let uuid = try DeviceInfo.platformUUID()
-
-        // Try standard path: derive userId → derive dbName → find file
-        if let uid = try? (userIdOverride ?? DeviceInfo.userId()) {
-            let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
-            let candidates = [
-                "\(DeviceInfo.containerPath)/\(dbName)",
-                "\(DeviceInfo.containerPath)/\(dbName).db",
-            ]
-            if let found = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-                path = found
-                secureKey = key ?? KeyDerivation.secureKey(userId: uid, uuid: uuid)
-                let reader = DatabaseReader(databasePath: path)
-                try reader.open(key: secureKey)
-                return reader
-            }
-        }
-
-        // Fallback: scan for DB file, then try candidate userIds
-        guard let discoveredPath = DeviceInfo.discoverDatabaseFile() else {
-            let uid = try userIdOverride ?? DeviceInfo.userId()
-            let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
-            throw KakaoError.databaseNotFound("\(DeviceInfo.containerPath)/\(dbName)")
-        }
-
-        // Try provided key first
-        if let key {
-            path = discoveredPath
-            secureKey = key
-        } else {
-            // Try each candidate userId to find the working key
-            let candidateIds: [Int]
-            if let override = userIdOverride {
-                candidateIds = [override]
-            } else {
-                var ids = (try? DeviceInfo.userId()).map { [$0] } ?? []
-                ids += DeviceInfo.candidateUserIds().filter { !ids.contains($0) }
-                candidateIds = ids
-            }
-
-            var foundKey: String?
-            for uid in candidateIds {
-                let candidateKey = KeyDerivation.secureKey(userId: uid, uuid: uuid)
-                let reader = DatabaseReader(databasePath: discoveredPath)
-                if reader.tryOpen(key: candidateKey) {
-                    reader.close()
-                    foundKey = candidateKey
-                    break
-                }
-            }
-
-            path = discoveredPath
-            secureKey = foundKey
-        }
-    }
-
+    let (path, secureKey) = try resolveDatabasePath(dbPath: dbPath, key: key, userId: userIdOverride)
     let reader = DatabaseReader(databasePath: path)
     try reader.open(key: secureKey)
     return reader

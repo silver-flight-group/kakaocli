@@ -52,10 +52,14 @@ public final class KakaoAutomator {
             }
             row = selfRow
         } else {
-            guard let chatRow = AXHelpers.findChatRow(table, chatName: chatName) else {
+            switch AXHelpers.lookupChatRow(table, chatName: chatName) {
+            case .found(let chatRow):
+                row = chatRow
+            case .notFound:
                 throw AutomationError.chatNotFound(chatName)
+            case .ambiguous(let names):
+                throw AutomationError.ambiguousChat(chatName, names)
             }
-            row = chatRow
         }
 
         // 6. Open the chat via AX row selection + Enter (works even when off-screen).
@@ -140,6 +144,7 @@ public final class KakaoAutomator {
 public enum AutomationError: Error, CustomStringConvertible {
     case noWindows
     case chatNotFound(String)
+    case ambiguousChat(String, [String])
     case inputFieldNotFound
     case sendFailed(String)
 
@@ -149,6 +154,9 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "KakaoTalk has no open windows"
         case .chatNotFound(let name):
             return "Chat '\(name)' not found in the chat list"
+        case .ambiguousChat(let name, let candidates):
+            let list = candidates.map { "  - \($0)" }.joined(separator: "\n")
+            return "Chat name '\(name)' matches \(candidates.count) chats — use the full name:\n\(list)"
         case .inputFieldNotFound:
             return "Could not find the message input field"
         case .sendFailed(let msg):

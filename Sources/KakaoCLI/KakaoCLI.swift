@@ -1,11 +1,12 @@
 import ArgumentParser
+import KakaoCore
 
 @main
 struct KakaoCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "kakaocli",
         abstract: "KakaoTalk CLI for AI agents",
-        version: "0.4.1",
+        version: kakaocliVersion,
         subcommands: [
             AuthCommand.self,
             ChatsCommand.self,

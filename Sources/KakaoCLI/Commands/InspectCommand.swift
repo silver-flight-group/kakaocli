@@ -38,12 +38,16 @@ struct InspectCommand: ParsableCommand {
                 Thread.sleep(forTimeInterval: 0.3)
             }
             if let table = AXHelpers.chatListTable(mainWindow) {
-                if let row = AXHelpers.findChatRow(table, chatName: chatName) {
+                switch AXHelpers.lookupChatRow(table, chatName: chatName) {
+                case .found(let row):
                     print("Found chat: \(chatName), double-clicking to open...")
                     AXHelpers.doubleClickElement(row)
                     Thread.sleep(forTimeInterval: 1.0)
-                } else {
+                case .notFound:
                     print("Chat '\(chatName)' not found in chat list")
+                    throw ExitCode.failure
+                case .ambiguous(let names):
+                    print("Chat name '\(chatName)' matches \(names.count) chats: \(names.joined(separator: ", "))")
                     throw ExitCode.failure
                 }
             }

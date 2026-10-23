@@ -210,15 +210,7 @@ public enum ChatHarvester {
 
     /// Extract the display name from a chat list row.
     private static func extractName(from row: AXUIElement) -> String {
-        for cell in AXHelpers.children(row) {
-            guard AXHelpers.role(cell) == "AXCell" else { continue }
-            for child in AXHelpers.children(cell) {
-                if AXHelpers.role(child) == "AXStaticText" && AXHelpers.identifier(child) == "_NS:18" {
-                    return AXHelpers.value(child) ?? "(unknown)"
-                }
-            }
-        }
-        return "(unknown)"
+        AXHelpers.chatRowName(row) ?? "(unknown)"
     }
 
     /// Main history loading loop for a single chat.

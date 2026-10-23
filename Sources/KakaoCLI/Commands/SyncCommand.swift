@@ -65,6 +65,12 @@ struct SyncCommand: ParsableCommand {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
 
+        // Batches the webhook rejected; resent ahead of the next batch. The watcher has already
+        // advanced past them, so dropping them here would lose them for good. Capped so a dead
+        // endpoint can't grow memory without bound.
+        let maxPendingWebhookMessages = 1000
+        var pendingWebhookMessages: [SyncMessage] = []
+
         watcher.watch(
             onMessages: { messages in
                 for msg in messages {
@@ -77,8 +83,16 @@ struct SyncCommand: ParsableCommand {
                 }
                 // Also publish to webhook if configured
                 if let publisher = webhookPublisher {
-                    if !publisher.publish(messages) {
-                        fputs("Warning: webhook delivery failed\n", stderr)
+                    let batch = pendingWebhookMessages + messages
+                    if publisher.publish(batch) {
+                        pendingWebhookMessages = []
+                    } else {
+                        let dropped = max(0, batch.count - maxPendingWebhookMessages)
+                        pendingWebhookMessages = Array(batch.suffix(maxPendingWebhookMessages))
+                        fputs("Warning: webhook delivery failed; \(pendingWebhookMessages.count) message(s) queued for retry\n", stderr)
+                        if dropped > 0 {
+                            fputs("Warning: retry queue full, dropped \(dropped) oldest message(s)\n", stderr)
+                        }
                     }
                 }
             },
@@ -90,14 +104,17 @@ struct SyncCommand: ParsableCommand {
 }
 
 /// Resolve database path and key without opening the database.
-func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String, key: String?) {
+func resolveDatabasePath(dbPath: String?, key: String?, userId userIdOverride: Int? = nil) throws -> (path: String, key: String?) {
     if let dbPath {
         return (dbPath, key)
     }
     let uuid = try DeviceInfo.platformUUID()
 
+    // DeviceInfo.userId() may brute-force a SHA-512 hash for up to 10s — resolve it only once.
+    let detectedUserId = Result { try userIdOverride ?? DeviceInfo.userId() }
+
     // Try standard path: derive userId → derive dbName → find file
-    if let uid = try? DeviceInfo.userId() {
+    if let uid = try? detectedUserId.get() {
         let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
         let candidates = [
             "\(DeviceInfo.containerPath)/\(dbName)",
@@ -111,7 +128,7 @@ func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String,
 
     // Fallback: scan for DB file, try candidate userIds for the key
     guard let discoveredPath = DeviceInfo.discoverDatabaseFile() else {
-        let uid = try DeviceInfo.userId()
+        let uid = try detectedUserId.get()
         let dbName = KeyDerivation.databaseName(userId: uid, uuid: uuid)
         throw KakaoError.databaseNotFound("\(DeviceInfo.containerPath)/\(dbName)")
     }
@@ -121,8 +138,10 @@ func resolveDatabasePath(dbPath: String?, key: String?) throws -> (path: String,
     }
 
     // Try candidate userIds to find a working key
-    var candidateIds = (try? DeviceInfo.userId()).map { [$0] } ?? [Int]()
-    candidateIds += DeviceInfo.candidateUserIds().filter { !candidateIds.contains($0) }
+    var candidateIds = (try? detectedUserId.get()).map { [$0] } ?? [Int]()
+    if userIdOverride == nil {
+        candidateIds += DeviceInfo.candidateUserIds().filter { !candidateIds.contains($0) }
+    }
     for uid in candidateIds {
         let candidateKey = KeyDerivation.secureKey(userId: uid, uuid: uuid)
         let reader = DatabaseReader(databasePath: discoveredPath)

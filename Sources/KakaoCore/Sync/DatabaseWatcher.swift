@@ -11,6 +11,9 @@ public final class DatabaseWatcher: @unchecked Sendable {
     private let pollInterval: TimeInterval
     private var lastLogId: Int64
     private var running = false
+    /// Kept open across polls — opening runs SQLCipher's key derivation, which is too costly per poll.
+    private var reader: DatabaseReader?
+    private var myUserId: Int64 = 0
 
     public init(databasePath: String, key: String?, pollInterval: TimeInterval = 2.0, startFromLogId: Int64? = nil) {
         self.databasePath = databasePath
@@ -44,10 +47,13 @@ public final class DatabaseWatcher: @unchecked Sendable {
                     onMessages(messages)
                 }
             } catch {
+                // Drop the connection so the next poll reopens it (e.g. the DB file was replaced).
+                closeReader()
                 onError(error)
             }
             Thread.sleep(forTimeInterval: pollInterval)
         }
+        closeReader()
     }
 
     public func stop() {
@@ -56,19 +62,26 @@ public final class DatabaseWatcher: @unchecked Sendable {
 
     // MARK: - Private
 
+    private func openReader() throws -> DatabaseReader {
+        if let reader { return reader }
+        let newReader = DatabaseReader(databasePath: databasePath)
+        try newReader.open(key: key)
+        myUserId = try newReader.myUserId()
+        reader = newReader
+        return newReader
+    }
+
+    private func closeReader() {
+        reader?.close()
+        reader = nil
+    }
+
     private func fetchMaxLogId() throws -> Int64 {
-        let reader = DatabaseReader(databasePath: databasePath)
-        try reader.open(key: key)
-        defer { reader.close() }
-        return try reader.maxLogId()
+        try openReader().maxLogId()
     }
 
     private func fetchNewMessages() throws -> [SyncMessage] {
-        let reader = DatabaseReader(databasePath: databasePath)
-        try reader.open(key: key)
-        defer { reader.close() }
-        let myUserId = try reader.myUserId()
-        return try reader.messagesSince(logId: lastLogId, myUserId: myUserId)
+        try openReader().messagesSince(logId: lastLogId, myUserId: myUserId)
     }
 }
 

@@ -27,6 +27,8 @@ No external dependencies besides `sqlcipher` (Homebrew). The `CSQLCipher` system
 
 ### UI Automation (AX)
 - **Self-chat**: Identified in UI by `"badge me"` AX image descriptor, NOT by name
+- **Chat list row name**: The first `AXStaticText` in the row's `AXCell`. Do NOT match by AX id — it was `_NS:18` in older builds and is `_NS:40` now (`_NS:18` is now a badge image).
+- **Group vs 1:1 rows**: Group chat rows have an `AXStaticText` with id `"Count Label"` (member count); 1:1 rows don't. `ChatNameMatcher` uses this to resolve a person's name to their 1:1 chat.
 - **Main window**: `id="Main Window"` for both login screen AND logged-in state
 - **Login screen vs logged-in**: Distinguish by window title ("Log in" vs "KakaoTalk") or Logo image
 - **Login fields**: Two regular `AXTextField` elements — email first, password second. Password is NOT `AXSecureTextField`.

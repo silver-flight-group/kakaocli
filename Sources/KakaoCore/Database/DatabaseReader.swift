@@ -39,7 +39,8 @@ public final class DatabaseReader: @unchecked Sendable {
 
                 do {
                     try exec("PRAGMA cipher_default_compatibility = \(compat)")
-                    try exec("PRAGMA KEY='\(key)'")
+                    let escapedKey = key.replacingOccurrences(of: "'", with: "''")
+                    try exec("PRAGMA KEY='\(escapedKey)'")
                     try exec("SELECT count(*) FROM sqlite_master")
                     return // success
                 } catch {
@@ -255,9 +256,17 @@ public final class DatabaseReader: @unchecked Sendable {
                 case SQLITE_TEXT:
                     row.append(String(cString: sqlite3_column_text(stmt, i)))
                 case SQLITE_NULL:
-                    row.append("")
+                    row.append(NSNull())
+                case SQLITE_BLOB:
+                    // Base64 so binary columns (e.g. NTChatRoom.displayMemberIds plists) survive JSON.
+                    let bytes = sqlite3_column_bytes(stmt, i)
+                    if let ptr = sqlite3_column_blob(stmt, i) {
+                        row.append(Data(bytes: ptr, count: Int(bytes)).base64EncodedString())
+                    } else {
+                        row.append("")
+                    }
                 default:
-                    row.append("")
+                    row.append(NSNull())
                 }
             }
             results.append(row)
