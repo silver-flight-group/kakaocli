@@ -186,25 +186,41 @@ public enum AXHelpers {
         return nil
     }
 
-    /// Find the AXRow in a chat list whose name label matches the given text.
+    public enum ChatRowLookup {
+        case found(AXUIElement)
+        case notFound
+        case ambiguous([String])
+    }
+
+    /// Find the single AXRow in a chat list whose name label matches the given text.
     /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
-    public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
+    ///
+    /// An exact name match wins over substring matches. If more than one row matches
+    /// (and no single exact match exists), returns `.ambiguous` so callers never act
+    /// on whichever row happens to be listed first.
+    public static func lookupChatRow(_ table: AXUIElement, chatName: String) -> ChatRowLookup {
+        var matches: [(name: String, row: AXUIElement)] = []
         for row in children(table) {
             guard role(row) == "AXRow" else { continue }
-            for cell in children(row) {
+            rowLoop: for cell in children(row) {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
                     if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
                         let name = value(child) ?? ""
-                        let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
-                        if matches {
-                            return row
+                        if name.localizedCaseInsensitiveContains(chatName) {
+                            matches.append((name, row))
+                            break rowLoop
                         }
                     }
                 }
             }
         }
-        return nil
+
+        let exactMatches = matches.filter { $0.name == chatName }
+        if exactMatches.count == 1 { return .found(exactMatches[0].row) }
+        if exactMatches.isEmpty && matches.count == 1 { return .found(matches[0].row) }
+        if matches.isEmpty { return .notFound }
+        return .ambiguous(matches.map(\.name))
     }
 
     /// Find the self-chat row (identified by "badge me" image in the cell).
